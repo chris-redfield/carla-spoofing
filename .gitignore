@@ -1,0 +1,13 @@
+# Vendored CarlaAir binary (6.85 GB) — fetched via scripts/download_carlaair.sh, not committed
+vendor/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+# Spoofing run outputs
+out/
+*.jsonl
+*.pcd
+*.png
+!docs/**/*.png

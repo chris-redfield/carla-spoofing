@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carla-spoofing"
+version = "0.1.0"
+description = "V2X cooperative-perception spoofing toolkit for CARLA (CarlaAir 0.9.16), with an OMNeT++ hand-off."
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.21",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# 'carla' is provided by the CarlaAir binary's bundled module, not from PyPI.
+dev = ["pytest>=7"]
+
+[project.scripts]
+carla-spoof = "carla_spoofing.scenarios.run_scenario:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

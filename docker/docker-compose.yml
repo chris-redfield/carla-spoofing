@@ -1,0 +1,52 @@
+# Reproducible CARLA V2X spoofing stack.
+#
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml up carla-sim      # start the sim
+#   docker compose -f docker/docker-compose.yml run --rm spoofing # run an attack
+#
+# The CarlaAir binary is mounted from ../vendor/CarlaAir-v0.1.7 (extracted by
+# scripts/extract_carlaair.sh). Mock-mode spoofing needs neither the sim nor a GPU.
+services:
+  carla-sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: carla-spoofing:0.1.0
+    environment:
+      SIM: "1"
+      MAP: "Town10HD"
+      CARLA_PORT: "2000"
+      DISPLAY: "${DISPLAY:-}"
+    volumes:
+      - ../vendor/CarlaAir-v0.1.7:/opt/carlaair
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    ports:
+      - "2000-2002:2000-2002"
+      - "41451:41451"       # AirSim drone RPC
+    shm_size: "4gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  spoofing:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: carla-spoofing:0.1.0
+    depends_on:
+      - carla-sim
+    environment:
+      SIM: "0"
+    volumes:
+      - ../vendor/CarlaAir-v0.1.7:/opt/carlaair
+      - ..:/workspace
+    working_dir: /workspace
+    # Default: run the CARLA-mode fake-object attack against the sim container.
+    # Override for other attacks, or use --mode mock (no sim/GPU needed).
+    command: >
+      carla-spoof --mode carla --host carla-sim --port 2000
+      --attack fake_object --fake-x 12 --fake-y 0 --out /workspace/out

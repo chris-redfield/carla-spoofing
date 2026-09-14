@@ -1,0 +1,11 @@
+# Runtime deps for the spoofing library (offline/mock mode + CARLA mode).
+# NOTE: the `carla` module itself ships inside the CarlaAir v0.1.7 binary
+# (env_setup/setup_env.sh extracts it into the conda env). Do NOT pip-install
+# the official `carla` package alongside CarlaAir — versions will clash.
+numpy>=1.21
+Pillow>=9.0
+# AirSim client for driving the flying drone (provided by CarlaAir setup too):
+airsim>=1.8.1
+pygame>=2.1
+# dev/test
+pytest>=7
