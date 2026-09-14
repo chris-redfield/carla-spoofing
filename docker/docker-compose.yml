@@ -16,7 +16,14 @@ services:
       SIM: "1"
       MAP: "Town10HD"
       CARLA_PORT: "2000"
-      DISPLAY: "${DISPLAY:-}"
+      # Window mode is the DEFAULT (on-screen UE4 window). Needs an X server and
+      # `xhost +local:` first (scripts/run_sim_gui.sh does that for you). On a
+      # headless server, override with docker/docker-compose.headless.yml.
+      HEADLESS: "0"
+      DISPLAY: "${DISPLAY:-:1}"
+      QT_X11_NO_MITSHM: "1"
+      RES_X: "1280"
+      RES_Y: "720"
     volumes:
       - ../vendor/CarlaAir-v0.1.7:/opt/carlaair
       - /tmp/.X11-unix:/tmp/.X11-unix:rw

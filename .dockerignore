@@ -1,0 +1,12 @@
+# Never send the heavy vendored sim or run outputs into the build context/image.
+vendor/
+out/
+.git/
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+*.jsonl
+*.pcd
+*.png

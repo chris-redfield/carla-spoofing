@@ -1,0 +1,7 @@
+# Headless override — no window, off-screen rendering only. Use on servers/CI
+# with no display, or when you don't want a window.
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.headless.yml up carla-sim
+services:
+  carla-sim:
+    environment:
+      HEADLESS: "1"
