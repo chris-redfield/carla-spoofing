@@ -106,6 +106,38 @@ def carla_actor_to_state(actor) -> ObjectState:
     )
 
 
+def carla_states_from_snapshot(world, snapshot):
+    """All vehicle/walker ObjectStates from ONE world snapshot (no per-actor RPC).
+
+    Uses the snapshot's cached transforms/velocities so a whole round of CPMs can
+    be built from a single ``get_actors()`` call instead of re-querying per sender.
+    """
+    states = []
+    for a in world.get_actors():
+        tid = a.type_id
+        if not (tid.startswith("vehicle") or tid.startswith("walker")):
+            continue
+        asnap = snapshot.find(a.id)
+        if asnap is None:
+            continue
+        tf = asnap.get_transform()
+        vel = asnap.get_velocity()
+        try:
+            ext = a.bounding_box.extent
+            dims = (2 * ext.x, 2 * ext.y, 2 * ext.z)
+        except Exception:
+            dims = (4.5, 2.0, 1.5)
+        states.append(ObjectState(
+            object_id=a.id,
+            position=(tf.location.x, tf.location.y, tf.location.z),
+            velocity=(vel.x, vel.y, vel.z),
+            yaw_deg=tf.rotation.yaw,
+            dimensions=dims,
+            classification=_classify_carla(a),
+        ))
+    return states
+
+
 def build_cpm_from_carla(world, sender_actor,
                          perception_range: float = DEFAULT_PERCEPTION_RANGE,
                          confidence: float = 0.95

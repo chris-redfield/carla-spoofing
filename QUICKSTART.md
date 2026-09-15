@@ -93,11 +93,14 @@ it's the live simulator (CARLA on port 2000, drone/AirSim on 41451).
 
 ```bash
 cd carla-spoofing
-make spoof                          # attacker injects a phantom car (default)
-make spoof ATTACK=remove_object     # attacker erases a real object
+make spoof                          # phantom-car injection (default: 60 s @ 1 Hz)
+make spoof ATTACK=remove_object     # erase a real object
+make spoof DURATION=30 RATE=2       # 30 s, each vehicle emits twice per second
 ```
-Each run connects to the live sim, picks a vehicle as the attacker, and broadcasts
-its **spoofed** cooperative-perception message alongside the honest ones. Results
+By default the attack runs for **~60 seconds** with **every vehicle broadcasting
+once per second** — the attacker's message spoofed, the rest honest — so the
+command blocks for about a minute. Tune with `DURATION=` (seconds) and `RATE=`
+(Hz per vehicle). With ~10 vehicles that is ~600 messages (60 spoofed). Results
 land in `out/`:
 
 | File | What it is |
@@ -126,7 +129,8 @@ make toolkit   # install NVIDIA container toolkit (once, sudo)
 make setup     # download + extract CarlaAir + build image
 make up        # start sim WITH a window (default)
 make headless  # start sim with NO window (servers)
-make spoof     # run an attack vs the live sim  (ATTACK=fake_object|remove_object|camera|none)
+make spoof     # attack the live sim: default 60 s @ 1 Hz/vehicle
+               # (ATTACK=fake_object|remove_object|camera, RATE=, DURATION=)
 make logs      # tail the simulator logs
 make down      # stop the simulator
 make help      # list all targets

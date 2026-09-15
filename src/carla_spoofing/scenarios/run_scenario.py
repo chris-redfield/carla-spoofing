@@ -25,12 +25,33 @@ import sys
 from ..v2x.cpm import diff_cpms
 from ..v2x.packet import Packet, FileSink, UdpSink, NullSink
 from ..lidar import save_pcd
-from ..report import MessageCsvWriter
+from ..report import ReportWriter
 from ..attacks import (
     NoAttack, FakeObjectAttack, FakeObjectSpec,
     RemoveObjectAttack, RemoveTarget,
     CameraInjectionAttack, ProceduralCarGenerator, ExternalCommandGenerator,
 )
+
+import time as _time
+
+
+def _plan(args):
+    """(n_frames, period_seconds) from --rate/--duration/--frames."""
+    rate = max(0.0, args.rate)
+    period = (1.0 / rate) if rate > 0 else 0.0
+    if args.frames and args.frames > 0:
+        n = args.frames
+    elif rate > 0:
+        n = max(1, round(args.duration * rate))
+    else:
+        n = 1
+    return n, period
+
+
+def _sleep_until(target_monotonic):
+    dt = target_monotonic - _time.monotonic()
+    if dt > 0:
+        _time.sleep(dt)
 
 
 def build_attack(args):
@@ -92,8 +113,13 @@ def run_mock(args, attack, sink, csv_writer) -> dict:
     world = MockWorld.default_scene()
     summary = {"mode": "mock", "attack": attack.name,
                "attacker_id": world.attacker_id, "frames": []}
-    for frame in range(args.frames):
-        gen_time = float(frame) * 0.1
+    n_frames, period = _plan(args)
+    step = period or 1.0
+    start = _time.monotonic()
+    for frame in range(n_frames):
+        if period:
+            _sleep_until(start + frame * period)
+        gen_time = float(frame) * step
         finfo = {"frame": frame, "senders": [], "messages": 0}
         for sid in world.sender_ids():
             honest = world.honest_cpm_for(sid, gen_time)
@@ -111,6 +137,9 @@ def run_mock(args, attack, sink, csv_writer) -> dict:
                                                       frame, gen_time)
                 finfo["attack_result"] = attack.result.to_dict()
         summary["frames"].append(finfo)
+    summary["frames_run"] = n_frames
+    summary["rate_hz"] = args.rate
+    summary["total_messages"] = sum(f["messages"] for f in summary["frames"])
     return summary
 
 
@@ -121,7 +150,7 @@ def run_carla(args, attack, sink, csv_writer) -> dict:
         print("ERROR: `carla` module not importable. Run inside the CarlaAir "
               "conda env / Docker image, with the sim reachable.", file=sys.stderr)
         raise SystemExit(2) from e
-    from ..perception import build_cpm_from_carla
+    from ..perception import carla_states_from_snapshot, build_cpm_from_objects
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(10.0)
@@ -139,14 +168,30 @@ def run_carla(args, attack, sink, csv_writer) -> dict:
           f"{attacker_id}")
     summary = {"mode": "carla", "attack": attack.name, "attacker_id": attacker_id,
                "n_senders": len(senders), "frames": []}
-    for frame in range(args.frames):
+    sender_meta = {v.id: ("drone" if ("drone" in v.type_id or "uav" in v.type_id)
+                          else "vehicle") for v in senders}
+    n_frames, period = _plan(args)
+    start = _time.monotonic()
+    for frame in range(n_frames):
+        if period:
+            _sleep_until(start + frame * period)
+        # ONE world fetch per round, shared by all senders (keeps 1 Hz feasible).
+        snap = world.get_snapshot()
+        gen_time = snap.timestamp.elapsed_seconds
+        states = carla_states_from_snapshot(world, snap)
+        by_id = {st.object_id: st for st in states}
         finfo = {"frame": frame, "senders": [], "messages": 0}
         for v in senders:
-            honest = build_cpm_from_carla(world, v)
+            ss = by_id.get(v.id)
+            if ss is None:
+                continue
+            honest = build_cpm_from_objects(
+                station_id=v.id, reference_position=ss.position, objects=states,
+                generation_time=gen_time, station_type=sender_meta[v.id])
             is_atk = (v.id == attacker_id)
             broadcast = attack.apply_cpm(honest) if is_atk else honest
             sink.send(Packet.cpm(broadcast, seq=frame))
-            csv_writer.add(frame=frame, sim_time=honest.generation_time,
+            csv_writer.add(frame=frame, sim_time=gen_time,
                            sender_id=v.id, sender_type=honest.station_type,
                            is_attacker=is_atk, honest=honest, broadcast=broadcast)
             finfo["senders"].append(v.id)
@@ -155,8 +200,11 @@ def run_carla(args, attack, sink, csv_writer) -> dict:
                 finfo["attacker_cpm_diff"] = diff_cpms(honest, broadcast)
                 finfo["attack_result"] = attack.result.to_dict()
         summary["frames"].append(finfo)
-        if args.frames > 1:
-            world.wait_for_tick()
+    summary["frames_run"] = n_frames
+    summary["rate_hz"] = args.rate
+    summary["total_messages"] = sum(f["messages"] for f in summary["frames"])
+    print(f"[carla] broadcast {summary['total_messages']} messages over "
+          f"{n_frames} rounds @ {args.rate} Hz ({len(senders)} vehicles).")
     print("[carla] NOTE: raw LiDAR/camera injection needs a sensor loop; see "
           "omnet/README.md. CPM-level multi-vehicle spoofing is active.")
     return summary
@@ -167,7 +215,12 @@ def main(argv=None):
     p.add_argument("--mode", choices=["mock", "carla"], default="mock")
     p.add_argument("--attack", choices=["none", "fake_object", "remove_object", "camera"],
                    default="fake_object")
-    p.add_argument("--frames", type=int, default=1)
+    p.add_argument("--frames", type=int, default=0,
+                   help="exact broadcast rounds (0 = derive from --duration/--rate)")
+    p.add_argument("--rate", type=float, default=1.0,
+                   help="broadcasts per vehicle per second, Hz (default 1)")
+    p.add_argument("--duration", type=float, default=60.0,
+                   help="wall-clock seconds to run when --frames is 0 (default 60)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=2000)
     p.add_argument("--attacker-id", type=int, default=None,
@@ -195,13 +248,12 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     attack = build_attack(args)
     sink = make_sink(args)
-    csv_path = os.path.join(args.out, "messages.csv")
-
     class _NullCsv:
         def add(self, **k): pass
         def close(self): pass
-        n_rows = 0
-    csv_writer = _NullCsv() if args.no_csv else MessageCsvWriter(csv_path)
+        n_messages = 0
+        n_object_rows = 0
+    csv_writer = _NullCsv() if args.no_csv else ReportWriter(args.out)
 
     try:
         run = run_mock if args.mode == "mock" else run_carla
@@ -210,13 +262,15 @@ def main(argv=None):
         sink.close()
         csv_writer.close()
 
-    summary["csv_rows"] = getattr(csv_writer, "n_rows", 0)
+    summary["messages_csv_rows"] = getattr(csv_writer, "n_messages", 0)
+    summary["object_csv_rows"] = getattr(csv_writer, "n_object_rows", 0)
     if args.sink == "file":
         with open(os.path.join(args.out, "run_summary.json"), "w") as fh:
             json.dump(summary, fh, indent=2)
     print(json.dumps(summary, indent=2))
     if not args.no_csv:
-        print(f"\nWrote {csv_writer.n_rows} message-rows to {csv_path}")
+        print(f"\nWrote {csv_writer.n_messages} messages to {os.path.join(args.out, 'messages.csv')}"
+              f" and {csv_writer.n_object_rows} object-rows to perceived_objects.csv")
     return 0
 
 

@@ -3,6 +3,8 @@
 COMPOSE := docker compose -f docker/docker-compose.yml
 HEADLESS := $(COMPOSE) -f docker/docker-compose.headless.yml
 ATTACK ?= fake_object
+RATE ?= 1
+DURATION ?= 60
 
 .PHONY: help doctor toolkit setup download extract build up gui headless spoof down logs clean
 
@@ -36,9 +38,10 @@ gui:             ## Start the sim with a window on your desktop (runs xhost)
 headless:        ## Start the sim headless (no window; servers/CI)
 	$(HEADLESS) up carla-sim
 
-spoof:           ## Run an attack vs the live sim: make spoof ATTACK=remove_object
+spoof:           ## Attack the live sim: make spoof [ATTACK=remove_object] [RATE=1] [DURATION=60]
 	$(COMPOSE) run --rm spoofing carla-spoof --mode carla --host carla-sim \
-	  --port 2000 --attack $(ATTACK) --out /workspace/out
+	  --port 2000 --attack $(ATTACK) --rate $(RATE) --duration $(DURATION) \
+	  --out /workspace/out
 
 down:            ## Stop and remove the sim container
 	$(COMPOSE) down

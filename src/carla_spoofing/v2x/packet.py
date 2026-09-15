@@ -131,9 +131,10 @@ class NullSink(PacketSink):
 class FileSink(PacketSink):
     """Append packets as newline-delimited JSON (the OMNeT++ hand-off file)."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, append: bool = False):
+        # Truncate per run by default so out/ reflects one run (matches the CSV).
         self.path = path
-        self._fh = open(path, "a", buffering=1)
+        self._fh = open(path, "a" if append else "w", buffering=1)
 
     def send(self, packet: Packet) -> None:
         self._fh.write(packet.to_json() + "\n")

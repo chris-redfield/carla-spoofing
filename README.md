@@ -55,7 +55,8 @@ make doctor    # check host prerequisites (Docker, GPU driver, toolkit, disk, di
 make toolkit   # install NVIDIA container toolkit (once, sudo)
 make setup     # download + extract CarlaAir (6.85 GB) + build the image
 make up        # start the sim WITH a window (default; 'make headless' for servers)
-make spoof     # run an attack vs the live sim (ATTACK=fake_object|remove_object|camera)
+make spoof     # attack the live sim; default 60 s @ 1 Hz per vehicle
+               # (ATTACK=fake_object|remove_object|camera, RATE=, DURATION=)
 make down      # stop the sim
 ```
 
