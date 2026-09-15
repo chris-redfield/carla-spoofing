@@ -1,118 +1,140 @@
-# QUICKSTART — running everything from scratch
+# QUICKSTART — from a fresh machine to a running spoofing sim
 
-Two tracks. **Track A** validates the spoofing logic in ~2 minutes with only
-Python (no GPU, no simulator, no 6.85 GB download). **Track B** brings up the
-full CarlaAir simulator + flying drone in Docker and spoofs against it.
+This gets you from **nothing** to a live CARLA simulation with the flying drone,
+running V2X spoofing attacks, in a handful of `make` commands. No prior knowledge
+of the project is assumed.
 
-Start with A to prove the pipeline, then do B.
-
----
-
-## Prerequisites (host)
-- Ubuntu 22.04, Python 3.8+
-- For Track B only: NVIDIA GPU + driver (you have an RTX 4070), Docker + Compose,
-  ~25 GB free disk, and the NVIDIA Container Toolkit (installed in step B1).
+> **What this is:** autonomous-vehicle cybersecurity **research in simulation**.
+> A malicious vehicle broadcasts *fake* cooperative-perception messages to its
+> neighbours (a phantom car, or a real object erased). Everything runs in Docker
+> for reproducibility. See [README.md](README.md) for the concepts.
 
 ---
 
-## Track A — spoofing logic only (no GPU, no sim)   ✅ verified working
+## 0. Prerequisites (install these first)
+
+You need a **Linux machine (Ubuntu 22.04 recommended) with an NVIDIA GPU**
+(needs **~4 GB of free VRAM**; an 8 GB card is plenty — lower it with `QUALITY=Low` on smaller GPUs).
+The project runs in Docker, but a few things must exist on the host first —
+the project does **not** install these for you:
 
 ```bash
-cd ~/proj/carla-spoofing
+# tools
+sudo apt update && sudo apt install -y git make curl
 
-# 1. Isolated env + install the toolkit
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+# Docker Engine + Compose plugin  (https://docs.docker.com/engine/install/ubuntu/)
+# ...then let your user run docker without sudo:
+sudo usermod -aG docker $USER && newgrp docker   # (or log out/in)
 
-# 2. Run each attack in mock mode (writes packets + artifacts to ./out)
-carla-spoof --mode mock --attack fake_object   --fake-x 15 --fake-y 0  --save-artifacts --out out
-carla-spoof --mode mock --attack remove_object --remove-x 40 --remove-y -3.5           --out out
-carla-spoof --mode mock --attack camera        --fake-x 18 --fake-y 1  --save-artifacts --out out
-
-# 3. Run the test suite (should print "10 passed")
-pip install pytest && pytest -q
-
-# 4. Minimal scripted demo (honest vs spoofed CPM side by side)
-python examples/demo_fake_object_offline.py
+# NVIDIA GPU driver — must already work:
+nvidia-smi        # should print your GPU. If not, install the driver first.
 ```
 
-**What to check in `out/`:**
-- `v2x_packets.jsonl` — the V2X packets handed off to OMNeT++ (one JSON per line).
-  `fake_object` adds an object id `999001`; `remove_object` makes a real id vanish.
-- `lidar_honest.pcd` vs `lidar_spoofed.pcd` — open in CloudCompare/Open3D; the
-  phantom cluster appears (fake_object) or a real object is carved out (remove_object).
-- `camera_spoofed_000.png` — a fake car composited into the frame.
-- `run_summary.json` — per-frame diff + attack ground-truth.
+You do **not** need to install Python, CARLA, or Unreal Engine — they live inside
+the container / the downloaded binary.
+
+**Check everything at once:**
+```bash
+git clone <this-repo> carla-spoofing && cd carla-spoofing
+make doctor
+```
+`make doctor` prints a PASS/WARN/FAIL list for git, make, Docker, the GPU driver,
+the container toolkit, disk space (~25 GB needed), and your display. Fix any
+**FAIL** before continuing; **WARN**s for the toolkit and the binary are resolved
+by the next two steps.
 
 ---
 
-## Track B — full CarlaAir sim + drone in Docker   ⚠️ first real run on this machine
+## 1. One-time host setup (GPU access for containers)
 
-### B1. NVIDIA Container Toolkit (once, needs sudo)
 ```bash
-bash scripts/install_nvidia_toolkit.sh
-# self-test — should print your RTX 4070:
-docker run --rm --gpus all nvidia/cuda:12.3.2-base-ubuntu22.04 nvidia-smi
+make toolkit
 ```
+Installs the **NVIDIA Container Toolkit** (needs your sudo password) so containers
+can use the GPU, and restarts Docker. This is the one host-level piece that can't
+live in an image. Run it once per machine.
 
-### B2. Get the CarlaAir binary (6.85 GB, resumable)
+---
+
+## 2. Fetch CarlaAir + build the image
+
 ```bash
-bash scripts/download_carlaair.sh    # verifies exact byte count at the end
-bash scripts/extract_carlaair.sh     # -> vendor/CarlaAir-v0.1.7/CarlaAir.sh
+make setup
 ```
+This **downloads the CarlaAir binary (6.85 GB, resumable)**, unpacks it into
+`vendor/`, and builds the Docker image. First run takes a while (download +
+~10 min build). It's safe to re-run — finished steps are skipped.
 
-### B3. Build the image
+> CarlaAir = CARLA 0.9.16 + Unreal Engine 4.26 with an integrated AirSim flying
+> drone. (The newest CARLA has no drone, which is why this version is used.)
+
+---
+
+## 3. Start the simulator
+
 ```bash
-docker compose -f docker/docker-compose.yml build
+make up
 ```
+Opens the **CarlaAir window on your desktop** with the city (Town10HD), ~10
+vehicles + pedestrians of traffic, and the drone. Leave this terminal running —
+it's the live simulator (CARLA on port 2000, drone/AirSim on 41451).
 
-### B4. Start the simulator (headless, GPU)
+- **Fly the drone:** `W A S D` move, **mouse** look, **scroll** speed, `N` weather,
+  `H` help, `Tab` release the mouse. The drone auto-takes-off to a stable hover
+  on spawn (it won't fall).
+- **No graphical desktop?** (a remote server) use `make headless` instead — same
+  sim, no window.
+- The red **REC** icon in the corner is CarlaAir's built-in screen recorder
+  (toggle `F`); it's unrelated to our data.
+
+---
+
+## 4. Run a spoofing attack (in a second terminal)
+
 ```bash
-docker compose -f docker/docker-compose.yml up carla-sim
-# leave this running; it serves CARLA RPC on :2000 and the drone (AirSim) on :41451
+cd carla-spoofing
+make spoof                          # attacker injects a phantom car (default)
+make spoof ATTACK=remove_object     # attacker erases a real object
 ```
+Each run connects to the live sim, picks a vehicle as the attacker, and broadcasts
+its **spoofed** cooperative-perception message alongside the honest ones. Results
+land in `out/`:
 
-### B5. Spoof against the running sim (second terminal)
+| File | What it is |
+|---|---|
+| `out/messages.csv` | **Human-readable.** One row per perceived object per message. Filter `message_kind = spoofed` or `spoof_flag != REAL` to see exactly what the attacker faked (`INJECTED` / `REMOVED`). |
+| `out/v2x_packets.jsonl` | The V2X packets, one JSON per line — the hand-off consumed later by OMNeT++. |
+| `out/run_summary.json` | Per-run summary (senders, what was spoofed). |
+
+Open `out/messages.csv` in any spreadsheet to see the attack.
+
+---
+
+## 5. Stop
+
 ```bash
-# CPM-level fake-object attack broadcast from a vehicle in the sim:
-docker compose -f docker/docker-compose.yml run --rm spoofing \
-  carla-spoof --mode carla --host carla-sim --port 2000 \
-  --attack fake_object --fake-x 12 --out /workspace/out
-
-# object removal:
-docker compose -f docker/docker-compose.yml run --rm spoofing \
-  carla-spoof --mode carla --host carla-sim --port 2000 \
-  --attack remove_object --remove-x 40 --remove-y -3.5 --out /workspace/out
-```
-> If the sim has no vehicles yet, spawn some first with CARLA's traffic generator
-> (`generate_traffic.py`) — the attacker/sender is picked from existing vehicles.
-
-### B6. Fly the drone (optional, in the spoofing container's env)
-```python
-import airsim
-d = airsim.MultirotorClient(port=41451)   # sim exposes 41451
-d.confirmConnection(); d.enableApiControl(True); d.armDisarm(True)
-d.takeoffAsync().join()
-d.moveToPositionAsync(80, 30, -25, 5).join()   # aerial attacker / sensor vantage
+make down        # stop the simulator container
 ```
 
 ---
 
-## The OMNeT++ hand-off (later — network assumed perfect)
-Both tracks write `out/v2x_packets.jsonl`. Feed it to OMNeT++ by replaying each
-line at its `header.sim_time`, or emit live over UDP with `--sink udp --udp-port 47000`.
-Schema + Artery/INET wiring: see [`omnet/README.md`](omnet/README.md) and
-[`omnet/cpm_packet_schema.md`](omnet/cpm_packet_schema.md).
+## All commands
 
----
+```bash
+make doctor    # check host prerequisites
+make toolkit   # install NVIDIA container toolkit (once, sudo)
+make setup     # download + extract CarlaAir + build image
+make up        # start sim WITH a window (default)
+make headless  # start sim with NO window (servers)
+make spoof     # run an attack vs the live sim  (ATTACK=fake_object|remove_object|camera|none)
+make logs      # tail the simulator logs
+make down      # stop the simulator
+make help      # list all targets
+```
 
-## Troubleshooting
-- **`carla` import error in Track B** — the module ships inside the CarlaAir
-  binary; make sure `vendor/CarlaAir-v0.1.7/` is extracted and mounted. Never
-  `pip install carla` alongside it.
-- **`docker: could not select device driver … gpu`** — B1 not done or Docker
-  not restarted.
-- **Sim exits immediately / black** — it runs `-RenderOffScreen`; check
-  `docker compose logs carla-sim`. 8 GB VRAM is enough for 0.9.16/UE4.26.
-- **Download wrong size** — `scripts/download_carlaair.sh` fails if the byte
-  count isn't exactly 6,846,384,047; just re-run it (resumable).
+## If something breaks
+- `make doctor` first — it catches most from-scratch issues.
+- Sim won't start / exits: `make logs` and look for the failure.
+- Window doesn't appear: ensure you're at a graphical (X11) session; `make up`
+  runs `xhost +local:` for you. On a headless box use `make headless`.
+- `docker: permission denied`: you're not in the `docker` group (see step 0).
