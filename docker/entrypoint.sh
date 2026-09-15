@@ -79,6 +79,28 @@ if [ "${SIM:-0}" = "1" ]; then
             --port "$RPC_PORT" >/tmp/auto_traffic.log 2>&1 &
     fi
 
+    # Auto-takeoff the AirSim drone to a stable hover so it doesn't sit/fall on
+    # spawn (SimpleFlight is disarmed with no throttle until first command).
+    # Set DRONE_TAKEOFF=0 to keep the vendor default (drone idle until you fly it).
+    if [ "${DRONE_TAKEOFF:-1}" = "1" ]; then
+        (
+          for i in $(seq 1 30); do
+            python -c "import socket;s=socket.socket();s.settimeout(1);s.connect(('127.0.0.1',41451))" 2>/dev/null && break
+            sleep 1
+          done
+          python -c "
+import airsim
+try:
+    c = airsim.MultirotorClient(port=41451); c.confirmConnection()
+    c.enableApiControl(True); c.armDisarm(True)
+    c.takeoffAsync().join(); c.moveToZAsync(-3.0, 1.0).join(); c.hoverAsync()
+    print('[drone] auto-takeoff: hovering at ~3 m')
+except Exception as e:
+    print('[drone] auto-takeoff skipped:', e)
+"
+        ) &
+    fi
+
     echo "[entrypoint] simulator up; holding foreground (docker stop to exit)."
     wait "$SIM_PID"
     exit $?
