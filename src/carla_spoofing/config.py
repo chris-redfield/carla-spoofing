@@ -16,8 +16,9 @@ DEFAULT_CARLA_PORT = 2000
 # CarlaAir / AirSim drone RPC endpoint.
 DEFAULT_AIRSIM_PORT = 41451
 
-# CPM protocol version we emit (ETSI EN 302 637-5 is v2; this is a simplified
-# JSON encoding of the same information model, tagged so consumers can branch).
+# CPM protocol version we emit. Reference standard: ETSI TS 103 324
+# (Collective Perception Service). This is a simplified JSON encoding of that
+# information model, tagged so consumers can branch on the version.
 CPM_PROTOCOL_VERSION = 2
 
 # Perception range an honest sensor/CPM would plausibly report (metres).

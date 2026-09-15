@@ -1,12 +1,23 @@
 """Collective Perception Message (CPM) model.
 
-A pragmatic, JSON-serialisable encoding of the ETSI EN 302 637-5 information
-model: a *station* (vehicle/RSU) reports the objects it perceives, so neighbours
-can fuse them into their own world model ("cooperative / collective perception").
+A pragmatic, JSON-serialisable encoding of the ETSI TS 103 324 (Collective
+Perception Service) information model: a *station* (vehicle/RSU) reports the
+objects it perceives, so neighbours can fuse them into their own world model
+("cooperative / collective perception").
 
 This is exactly the message an attacker forges: adding a non-existent object,
 dropping a real one, or shifting/mis-classifying one. The struct is kept flat
 and explicit so the OMNeT++ side and any analysis code can read it directly.
+
+SIMPLIFICATION (intentional): we use a FULL-SNAPSHOT scheme — every station
+includes ALL objects it currently perceives in every CPM. The real TS 103 324
+instead applies object *inclusion rules* + redundancy mitigation: an object is
+(re)transmitted only when it is new, has moved > 4 m, changed speed > 0.5 m/s,
+changed heading > 4 deg, or has not been sent for > 1 s. Those rules are
+orthogonal to the spoofing attack and mainly affect channel load (and only bite
+at CPM rates above ~1 Hz), so they are omitted for now. To become
+standards-compliant, add per-(sender, object) state and apply the TS 103 324
+inclusion rules when building each honest CPM (see perception.py).
 """
 from __future__ import annotations
 
