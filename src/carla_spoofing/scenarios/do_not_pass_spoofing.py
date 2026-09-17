@@ -343,7 +343,7 @@ def run_mock(cfg: ScenarioConfig, sink, msg_writer, dec_writer) -> Outcome:
     cfg.drone_position = (cfg.ego_back_m, -10.0, 15.0)
 
     ego_v = KinematicVehicle(MOCK_EGO_ID, position=(0.0, lane_y, 0.0), yaw_deg=0.0,
-                             speed=30.0 * KMH)
+                             speed=OvertakeParams().cruise_speed_mps)
     lead_v = KinematicVehicle(MOCK_LEAD_ID, position=(cfg.lead_ahead_m, lane_y, 0.0),
                               yaw_deg=0.0, speed=cfg.lead_speed_kmh * KMH)
     onc_v = KinematicVehicle(MOCK_ONCOMING_ID,
@@ -760,11 +760,13 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         if args.linger > 0:
             print(f"[dnp] holding the finished scene for {args.linger:.0f}s "
                   f"before clearing the vehicles (--linger 0 to skip) ...")
-            for _ in range(int(args.linger / cfg.tick_s)):
+            hold_until = time.monotonic() + args.linger
+            while time.monotonic() < hold_until:
                 try:
                     world.tick()
                 except RuntimeError:
                     break        # simulator went away; nothing left to hold
+                time.sleep(cfg.tick_s)
 
     except KeyboardInterrupt:
         # Ctrl-C during a blocking RPC only lands once that call returns, so say
