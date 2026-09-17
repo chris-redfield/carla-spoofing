@@ -753,6 +753,19 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
             if stop_at is not None and sim_time >= stop_at:
                 break
 
+        # Hold the finished scene BEFORE teardown. The `finally` below destroys
+        # all three vehicles and the next run starts straight after, so without
+        # this the wreck is on screen for a single frame and then everything
+        # vanishes.
+        if args.linger > 0:
+            print(f"[dnp] holding the finished scene for {args.linger:.0f}s "
+                  f"before clearing the vehicles (--linger 0 to skip) ...")
+            for _ in range(int(args.linger / cfg.tick_s)):
+                try:
+                    world.tick()
+                except RuntimeError:
+                    break        # simulator went away; nothing left to hold
+
     except KeyboardInterrupt:
         # Ctrl-C during a blocking RPC only lands once that call returns, so say
         # something immediately and fall through to cleanup rather than dying
@@ -874,9 +887,9 @@ def main(argv=None):
     p.add_argument("--crash-hold", type=float, default=3.0,
                    help="seconds to keep simulating after a collision, so the "
                         "crash is visible rather than the last frame")
-    p.add_argument("--linger", type=float, default=6.0,
-                   help="seconds to hold the finished scene before destroying "
-                        "the vehicles (0 = tear down immediately)")
+    p.add_argument("--linger", type=float, default=7.0,
+                   help="seconds to hold the finished scene before destroying the "
+                        "vehicles and starting the next run (0 = tear down at once)")
     p.add_argument("--wall-timeout", type=float, default=600.0,
                    help="hard wall-clock budget for one run; stops a wedged "
                         "simulator from hanging the scenario indefinitely")
