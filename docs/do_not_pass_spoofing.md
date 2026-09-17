@@ -228,29 +228,50 @@ Two things to expect:
 
 ## 5. Measured outcome
 
-From the mock backend. An overtake on its own is **not** the failure — the honest ego is
-supposed to overtake eventually. The failure is overtaking while a hazard is genuinely
-there, so the run is scored against an omniscient ground-truth decision.
+Live CARLA, Town01, 2026-09-17. An overtake on its own is **not** the failure — the
+honest ego is supposed to overtake eventually. The failure is overtaking while a hazard
+is genuinely there, so each run is scored against an omniscient ground-truth decision at
+the moment the pass becomes uncommittable.
 
 | | honest run | spoofed run |
 |---|---|---|
-| pulls out at | t = 7.0 s | t = 0.65 s |
-| ground truth at that moment | `PASS` | `DO_NOT_PASS` |
-| completes the manoeuvre | yes, back in lane at 15.5 s | no |
-| collision | none | head-on, t = 5.45 s, 12.3 m/s |
+| pulls out at | t = 7.0 s | t = 0.6 s |
+| pass committed at | t = 7.85 s | t = 1.45 s |
+| ground truth then | `PASS` | `DO_NOT_PASS` |
+| outcome | completes the pass, back in lane at 14.7 s | **head-on with `vehicle.tesla.model3` at t = 5.45 s, 11.7 m/s** |
+| collision | none | yes, the oncoming vehicle |
 
 ```
 attack_caused_unsafe_overtake: true
 attack_caused_collision:       true
 ```
 
-**An emergent detail worth keeping.** In the spoofed run the ego *does* detect the
-oncoming car with its own sensors — once it leaves its lane the lead stops occluding it,
-and the warning flips back to `DO_NOT_PASS`. But the manoeuvre is already past the abort
-threshold, so it is too late. That behaviour was not coded; it falls out of the occlusion
-model plus the commitment logic.
+The messages behind it, round 0 of the spoofed run:
 
----
+```
+sender 9001  claims 9001  rsu      honest    6 objects
+sender 229   claims 229   vehicle  honest    3 objects
+sender 198   claims 9001  drone    spoofed   5 objects   removed=231
+```
+
+Sender 198 is the drone, claiming to be station 9001 — the RSU. Object 231 is the
+oncoming car it deleted.
+
+**Nothing broadcasts a warning.** The RSU sends only perceived objects; the ego computes
+`PASS` / `DO_NOT_PASS` itself and logs its reasoning:
+
+```
+t=3.0  DO_NOT_PASS  oncoming car 231: gap 56.0 m <= 70 m; time-to-meet 2.8 s <= 10 s
+```
+
+That is why the attack deletes an object rather than forging a warning flag: the victim's
+logic is untouched and works perfectly, over a poisoned world model.
+
+**An emergent detail worth keeping.** In the spoofed run the ego detects the oncoming car
+with its *own* sensors at t = 3.0 s — once it is in the opposing lane the lead no longer
+occludes it — and the warning correctly flips back to `DO_NOT_PASS`. But the pass was
+committed at t = 1.45 s, so it is too late. That behaviour was not coded; it falls out of
+the occlusion model plus the commitment threshold.
 
 ## Why it is closed-loop
 
@@ -270,9 +291,15 @@ anything fancier would hide the mechanism behind a black box.
 
 ## Status
 
-Verified in the mock backend and by the test suite. The **live-CARLA path has not been run
-yet**: road-graph placement on Town01, the `--use-spawn-points` path that reuses spawn
-indices 181/177/163, and the AirSim drone are all still unverified.
+**Verified end to end in live CARLA on 2026-09-17**, plus the mock backend and the test
+suite. Road-graph placement, the drone teleport and the closed-loop collision all work.
+
+Still unverified: the `--use-spawn-points` path that reuses the original CarlaNetpp spawn
+indices 181/177/163.
+
+Measured on the live run: the AirSim-to-CARLA frame offset is `(-203.0, -188.1, 1.9)` —
+AirSim's origin sits ~275 m from CARLA's, which is why a drone spawn pose expressed in raw
+CARLA coordinates cannot work.
 
 ## Scene provenance
 

@@ -119,7 +119,11 @@ def place_at(world, host: str, target: Vec3, yaw_deg: float = 0.0,
 
         # Hold station. Without this SimpleFlight drops the drone out of the sky
         # the moment physics resumes.
-        client.moveToPositionAsync(*target_ned, 10.0)
+        # Hold the commanded yaw explicitly: left to its default the controller
+        # is free to swing the nose while it settles, undoing the teleport's
+        # orientation.
+        client.moveToPositionAsync(*target_ned, 10.0,
+                                   yaw_mode=airsim.YawMode(False, yaw_deg))
         deadline = time.time() + timeout_s
         gap = _distance_to(client, target_ned)
         while gap > ARRIVAL_TOLERANCE_M and time.time() < deadline:

@@ -93,6 +93,11 @@ WEATHER = "CloudyNoon"
 
 DRONE_LOCATION: Vec3 = (392.791443, 107.608482, 14.855516)
 DRONE_ROTATION = (-27.212101, -89.532944, -0.025725)      # pitch, yaw, roll
+# The original pose faced the drone down one direction of the road. This scene
+# plays out the other way, so the drone is turned to look along it. Kept as an
+# offset rather than edited into DRONE_ROTATION, so the surveyed pose above stays
+# verbatim from the CarlaNetpp run.
+DRONE_VIEW_YAW_DEG = DRONE_ROTATION[1] + 180.0            # -89.53 -> 90.47
 SPECTATOR_LOCATION: Vec3 = (377.332733, 125.954506, 35.793575)
 SPECTATOR_ROTATION = (-54.568348, -0.546539, -0.018311)
 
@@ -571,7 +576,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
     # attack itself, but the whitepaper scene has the drone hovering roadside.
     if not args.no_fly_drone:
         status = place_drone_at(world, args.host, cfg.drone_position,
-                                yaw_deg=DRONE_ROTATION[1],
+                                yaw_deg=DRONE_VIEW_YAW_DEG,
                                 timeout_s=args.drone_timeout)
         print(f"[dnp] {status}")
         outcome.notes.append(status)
@@ -669,6 +674,10 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         # start its log at ~60 s. Every time recorded here is relative to the
         # first tick of THIS run.
         clock_origin = None
+        # Set once a collision happens, so the loop keeps stepping for a moment
+        # instead of cutting the instant the cars touch -- otherwise the crash is
+        # the last frame anyone sees.
+        stop_at: Optional[float] = None
         for tick in range(n_ticks):
             if time.monotonic() > wall_deadline:
                 outcome.notes.append(
@@ -738,6 +747,10 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
                     "ego_speed_mps": round(ego_st.speed, 2),
                     "lateral_offset_m": round(ego_ctrl.lateral_offset, 2),
                 }
+                print(f"[dnp] collision at {sim_time:.2f}s with "
+                      f"{ev['with_type_id']} ({ev['with_actor_id']})")
+                stop_at = sim_time + args.crash_hold
+            if stop_at is not None and sim_time >= stop_at:
                 break
 
     except KeyboardInterrupt:
@@ -858,6 +871,12 @@ def main(argv=None):
                    help="CARLA RPC timeout in seconds for ordinary calls (map "
                         "loading gets its own, much longer, deadline). Also caps "
                         "how long a Ctrl-C waits on an in-flight call.")
+    p.add_argument("--crash-hold", type=float, default=3.0,
+                   help="seconds to keep simulating after a collision, so the "
+                        "crash is visible rather than the last frame")
+    p.add_argument("--linger", type=float, default=6.0,
+                   help="seconds to hold the finished scene before destroying "
+                        "the vehicles (0 = tear down immediately)")
     p.add_argument("--wall-timeout", type=float, default=600.0,
                    help="hard wall-clock budget for one run; stops a wedged "
                         "simulator from hanging the scenario indefinitely")
