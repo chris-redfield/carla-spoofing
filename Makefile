@@ -5,12 +5,14 @@ HEADLESS := $(COMPOSE) -f docker/docker-compose.headless.yml
 ATTACK ?= fake_object
 RATE ?= 1
 DURATION ?= 60
+RUN ?= both
 
-.PHONY: help doctor toolkit setup download extract build up gui headless spoof down logs clean
+.PHONY: help doctor toolkit setup download extract build up gui headless \
+        spoof do-not-pass do-not-pass-mock test down logs clean
 
 help:            ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-17s\033[0m %s\n",$$1,$$2}'
 
 doctor:          ## Check host prerequisites for a from-scratch run
 	@bash scripts/doctor.sh
@@ -42,6 +44,21 @@ spoof:           ## Attack the live sim: make spoof [ATTACK=remove_object] [RATE
 	$(COMPOSE) run --rm spoofing carla-spoof --mode carla --host carla-sim \
 	  --port 2000 --attack $(ATTACK) --rate $(RATE) --duration $(DURATION) \
 	  --out /workspace/out
+
+do-not-pass:     ## Do-Not-Pass spoofing vs the live sim: make do-not-pass [RUN=both]
+                 ## Prepares its own world (loads Town01, clears traffic) — just 'make up' first.
+	$(COMPOSE) run --rm spoofing \
+	  python -m carla_spoofing.scenarios.do_not_pass_spoofing \
+	  --mode carla --host carla-sim --port 2000 --run $(RUN) \
+	  --out /workspace/out/do_not_pass
+
+do-not-pass-mock: ## Same scenario with no simulator at all (kinematic mock)
+	$(COMPOSE) run --rm --no-deps spoofing \
+	  python -m carla_spoofing.scenarios.do_not_pass_spoofing \
+	  --mode mock --run $(RUN) --out /workspace/out/do_not_pass
+
+test:            ## Run the unit tests (no sim, no GPU)
+	PYTHONPATH=src python -m pytest tests/ -q
 
 down:            ## Stop and remove the sim container
 	$(COMPOSE) down

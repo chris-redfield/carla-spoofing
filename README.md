@@ -34,10 +34,16 @@ The attack targets that message. A malicious vehicle broadcasts a CPM that **lie
 - **`camera`** — forges the shared camera image with an AI-generated vehicle
   (pluggable image generator).
 
-**Key point:** this is a *data-integrity attack on a broadcast message*, not a
-control attack. We never drive any car. The implementation is: read CARLA ground
-truth as the sender's honest perception → forge the message → emit a packet. The
-network is assumed perfect and is left to OMNeT++ (below).
+**Key point:** the attack itself is a *data-integrity attack on a broadcast
+message*, never a control attack. The attacker only lies: read CARLA ground truth
+as the sender's honest perception → forge the message → emit a packet. The network
+is assumed perfect and is left to OMNeT++ (below).
+
+What the *victim* then does is a separate question, and the two scenarios answer
+it differently. The multi-vehicle runner (`make spoof`) stops at the message and
+leaves the consequence to be measured downstream. The Do-Not-Pass scenario
+(below) goes further and gives the victim a controller, so the attack's
+consequence — a collision — is produced rather than asserted.
 
 Every vehicle broadcasts its own honest CPM each cycle; **one** vehicle is the
 attacker whose CPM is poisoned — so the output is a realistic stream of mostly-honest
@@ -62,6 +68,47 @@ make down      # stop the sim
 
 **The drone** is an AirSim multirotor in the same world; it auto-hovers on spawn
 and you fly it in the window (WASD) or via `airsim.MultirotorClient(port=41451)`.
+
+## Scenario: Do-Not-Pass Warning spoofing (whitepaper use case 1b)
+
+A **drone impersonating a Road Side Unit** makes a car overtake into oncoming
+traffic. Two-lane road on **Town01**: the ego follows a slow **lead** vehicle it
+cannot see round, an **oncoming** car approaches in the other lane, and an **RSU**
+broadcasts a CPM of the whole segment. The drone rebroadcasts that view stamped
+with the **RSU's station id**, minus the oncoming car. Because a receiver keeps
+one entry per station, the forgery *replaces* the genuine report instead of adding
+to it — so the hazard vanishes, the ego's warning flips `DO_NOT_PASS → PASS`, and
+it pulls out.
+
+```bash
+make up                # start the sim (Town01 by default — where this scene lives)
+make do-not-pass       # honest baseline + attack run, then the comparison
+make do-not-pass-mock  # the same closed loop with no simulator at all
+```
+
+The sim starts on **Town01** so nothing has to reload the map at runtime — that call
+is unreliable in this build (see the scenario doc). `do-not-pass` still clears
+auto-spawned traffic and places the drone at the roadside fake-RSU pose itself.
+
+**This scenario is closed-loop, and deliberately unscripted.** The ego is driven
+by `control.DoNotPassController`, whose *only* trigger for an overtake is the
+warning it computes from received messages — no timer, no scripted steering. The
+honest run and the attack run differ in nothing but the message stream, so the
+outcome is a causal result rather than a staged one:
+
+| | honest run | spoofed run |
+|---|---|---|
+| overtakes | yes, once the road really is clear | yes, immediately |
+| ground truth at that moment | `PASS` | `DO_NOT_PASS` |
+| collision | none | head-on with the oncoming car |
+
+A detail worth noting: in the attack run the ego *does* spot the oncoming vehicle
+with its own sensors once it leaves its lane and the lead stops occluding it — but
+by then the manoeuvre is committed and it is too late to abort. That behaviour is
+emergent, not coded.
+
+Outputs land in `out/do_not_pass/{honest,spoofed}/`, plus a top-level
+`comparison.json` with the verdict.
 
 ## Outputs (in `out/`)
 
@@ -88,11 +135,15 @@ docker/                Dockerfile, docker-compose.yml (+ .headless.yml override)
 src/carla_spoofing/
   v2x/cpm.py           the CPM message model
   v2x/packet.py        packet format + sinks (file .jsonl / UDP) for OMNeT++
-  attacks/             fake_object · remove_object · camera_injection
+  attacks/             fake_object · remove_object · camera_injection · identity_spoof
   perception.py        build an honest CPM from CARLA (or mock) ground truth
+  fusion.py            receiver-side CPM fusion (one entry per station) + occlusion
+  do_not_pass_warning.py  receiver-side DNPW decision: objects + ego pose -> PASS/DO_NOT_PASS
+  control.py           simple lane-follow / overtake controllers (CARLA + kinematic mock)
   lidar.py             point-cloud inject / carve primitives
-  report.py            messages.csv writer
+  report.py            messages.csv · perceived_objects.csv · do_not_pass_decisions.csv
   scenarios/           run_scenario.py (multi-vehicle runner) · mock_world.py (no-sim scene)
+                       do_not_pass_spoofing.py (closed-loop DNPW scenario)
 omnet/                 packet schema + OMNeT++/Artery integration notes
 vendor/                the downloaded CarlaAir binary (git-ignored, ~24 GB)
 ```

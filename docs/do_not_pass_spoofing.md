@@ -1,0 +1,293 @@
+# Do-Not-Pass Warning spoofing — drone as a fake RSU
+
+Whitepaper use case 1b (`White_paper___B5GCyberTestV2X.pdf`, Fig. 2): *"a collision
+resulting from a spoofer drone sending false information masquerading as a Road Side
+Unit (RSU)."*
+
+A drone impersonating an RSU erases an oncoming vehicle from the cooperative-perception
+stream, and the receiving car overtakes into it. The manoeuvre is produced by the
+victim's own controller, not scripted — see [Why it is closed-loop](#why-it-is-closed-loop).
+
+Code: `src/carla_spoofing/scenarios/do_not_pass_spoofing.py`
+
+---
+
+## 1. Architecture
+
+```
+                 ┌─────────────────────────────────────────────┐
+                 │  SIMULATED WORLD  ·  CARLA Town01           │
+                 │  ego (Rx) — lead (occluder) — oncoming      │
+                 └──────────────────────┬──────────────────────┘
+                                        │ ground-truth poses
+                     ┌──────────────────┴──────────────────┐
+                     ▼                                     ▼
+ ┌─────────────────────────────────┐   ┌─────────────────────────────────┐
+ │ HONEST INFRASTRUCTURE           │   │ ATTACKER — drone as fake RSU    │
+ │                                 │   │                                 │
+ │  RSU · station 9001             │   │  drone · true station 9002      │
+ │  build_cpm_from_objects()       │   │  remove_object  → drop oncoming │
+ │                                 │   │  identity_spoof → claims 9001   │
+ └────────────────┬────────────────┘   └────────────────┬────────────────┘
+                  │ CPM · 1 Hz                          │ forged CPM,
+                  │                                     │ claims id 9001
+                  └────────────────┐   ┌────────────────┘
+                                   ▼   ▼
+ ┌──────────────────────── EGO VEHICLE (Rx) ─────────────────────────────┐
+ │                                                                       │
+ │   V2X receiver ────────┐              own sensors                     │
+ │                        │                   │                          │
+ │                        │                   ▼                          │
+ │                        │           visible_objects()                  │
+ │                        │           (the lead occludes the view)       │
+ │                        │                   │                          │
+ │                        ▼                   ▼                          │
+ │   ╔═══════════════════════════════════════════════════════════════╗   │
+ │   ║ DATA FUSION    fuse_latest_by_station()                       ║   │
+ │   ║ one entry per station — the newest CPM REPLACES the old one   ║   │
+ │   ╚═══════════════════════════════════════════════════════════════╝   │
+ │                                │ fused object list                    │
+ │                                ▼                                      │
+ │     DECISION    evaluate_do_not_pass()                                │
+ │                 gap · closing speed · time to meet                    │
+ │                                │ PASS / DO_NOT_PASS                   │
+ │                                ▼                                      │
+ │     CONTROL     DoNotPassController                                   │
+ │                 FOLLOW → PASSING → RETURNING                          │
+ │                                │                                      │
+ │                                ▼                                      │
+ │                 VehicleCommand · throttle, steer, brake               │
+ └────────────────────────────────┬──────────────────────────────────────┘
+                                  │ actuation — closes the loop
+                                  └─────────────▶ back into the world
+
+ every message, honest and forged, is also written to
+ v2x_packets.jsonl · messages.csv · do_not_pass_decisions.csv   → OMNeT++
+```
+
+The attacker only transmits. Everything that makes the car move sits **inside** the ego:
+fusion, the warning, and the controller — and the controller's only trigger for an
+overtake is the warning it just computed from received messages.
+
+<details>
+<summary>Same diagram as Mermaid (renders on GitHub / VS Code preview)</summary>
+
+```mermaid
+flowchart TB
+    subgraph W["SIMULATED WORLD · CARLA Town01"]
+        ACT["ego (Rx) · lead (occluder) · oncoming"]
+    end
+
+    subgraph R["HONEST INFRASTRUCTURE"]
+        RSU["RSU · station 9001<br/>build_cpm_from_objects()"]
+    end
+
+    subgraph D["ATTACKER — drone as fake RSU"]
+        DR["drone · true station 9002"]
+        RM["remove_object → drop oncoming"]
+        ID["identity_spoof → claims id 9001"]
+        DR --> RM --> ID
+    end
+
+    subgraph E["EGO VEHICLE (Rx)"]
+        V2X["V2X receiver"]
+        SEN["own sensors"]
+        OCC["visible_objects()<br/>lead occludes the view"]
+        FUSE["DATA FUSION<br/>fuse_latest_by_station()<br/>one entry per station"]
+        DEC["DECISION<br/>evaluate_do_not_pass()"]
+        CTL["CONTROL<br/>DoNotPassController"]
+        CMD["VehicleCommand<br/>throttle · steer · brake"]
+        SEN --> OCC --> FUSE
+        V2X --> FUSE --> DEC --> CTL --> CMD
+    end
+
+    ACT -- "ground truth" --> RSU
+    ACT -- "ground truth" --> DR
+    RSU -. "CPM · 1 Hz" .-> V2X
+    ID  -. "forged CPM, claims id 9001" .-> V2X
+    CMD -- "actuation — closes the loop" --> ACT
+```
+
+</details>
+
+---
+
+## 2. Why it has to impersonate the RSU
+
+Dropping the oncoming vehicle from a message is not enough on its own. A receiver keeps
+**one entry per sending station**, so what the forgery is *signed as* decides whether it
+adds to the ego's world model or overwrites part of it.
+
+```
+  FORGED UNDER THE DRONE'S OWN ID              FORGED UNDER THE RSU'S ID
+  ───────────────────────────────              ─────────────────────────
+
+  RSU   9001  {ego, lead, oncoming}            RSU   9001  {ego, lead, oncoming}
+  drone 9002  {ego, lead}                      drone 9001  {ego, lead}   ← claims
+        │                                            │
+        ▼  fuse_latest_by_station()                  ▼  fuse_latest_by_station()
+  two stations, both kept → UNION               one station, newest wins → REPLACED
+        │                                            │
+        ▼                                            ▼
+  {ego, lead, oncoming}                         {ego, lead}
+  the oncoming car survives                     the oncoming car is erased
+        │                                            │
+        ▼                                            ▼
+  DO_NOT_PASS — suppression fails                PASS — the ego pulls out
+```
+
+The only difference between the two columns is the station id on the forged message.
+`tests/test_do_not_pass.py::test_impersonated_cpm_supersedes_the_genuine_one` asserts
+that the left-hand case genuinely fails, so the mechanism cannot quietly rot.
+
+---
+
+## 3. Running it
+
+Both scenarios already exist: `honest` is the happy path, `spoofed` is the sad one, and
+the default `both` runs them back to back and writes the comparison.
+
+### Terminal 1 — the simulator
+
+```bash
+cd ~/proj/carla-spoofing
+make up                        # or: docker compose -f docker/docker-compose.yml up carla-sim
+```
+
+The sim **starts on Town01** (the compose default), so the usual run reloads nothing.
+
+> **Do not switch maps at runtime in this build.** `client.load_world()` has to tear down
+> a level while a second client (the container's `auto_traffic.py`) still owns actors and
+> the AirSim plugin sits in the same UE4 process. On identical inputs it completed twice
+> and hung indefinitely twice. The scenario will still attempt it if it finds the wrong
+> map, but the attempt is time-boxed to 120 s and then tells you to restart the sim on the
+> right map. A notebook against vanilla CARLA does not hit this — there, `load_world` runs
+> first, on an empty world, with no second client and no flight-physics plugin attached.
+
+### Where the drone comes from
+
+CarlaAir's drone is an AirSim multirotor that spawns wherever AirSim puts it. The
+scenario teleports it to the roadside fake-RSU pose at startup (`simSetVehiclePose`,
+no flight across the map) and reports what it did:
+
+```
+drone placed at (392.8, 107.6, 14.9), hovering [offset=(0.0, 0.0, 0.0)]
+```
+
+The `offset` is the measured AirSim-to-CARLA frame difference. `--no-fly-drone` skips
+the whole step — the drone's pose is cosmetic, since a forged CPM claims the
+impersonated station's position rather than the attacker's.
+
+### Terminal 2 — the scenario
+
+```bash
+make do-not-pass               # happy + sad, then the verdict
+make do-not-pass RUN=honest    # just the happy path
+make do-not-pass RUN=spoofed   # just the sad path
+```
+
+### No simulator at all
+
+```bash
+make do-not-pass-mock   # same closed loop on a kinematic bicycle model, no GPU
+make test               # 18 unit tests, incl. the end-to-end mock verdict
+```
+
+### Reading the result
+
+```bash
+cat out/do_not_pass/comparison.json
+
+# the decision flip, round by round
+column -s, -t out/do_not_pass/spoofed/do_not_pass_decisions.csv | less -S
+
+# who sent what, and what was faked
+column -s, -t out/do_not_pass/spoofed/messages.csv | less -S
+```
+
+---
+
+## 4. What you see in the window
+
+It runs in windowed CARLA, and the spectator is moved automatically to the lateral pose
+from the earlier CarlaNetpp run, so the whole segment is framed without flying the camera.
+
+| | what happens |
+|---|---|
+| **Honest run** | The ego closes on the slow lead and *sits behind it* while the oncoming car approaches and passes. Only then does it pull out, overtake, and tuck back in. |
+| **Spoofed run** | The ego pulls out almost immediately, accelerates, and meets the oncoming car head-on. Same scene, same controller — only the message stream differs. |
+
+Two things to expect:
+
+- The scenario drives the clock itself (synchronous mode, 0.05 s steps), so the window
+  advances in step with the run rather than free-running.
+- `RUN=both` spawns and destroys its own three cars for each run, so the scene resets
+  once in the middle.
+
+---
+
+## 5. Measured outcome
+
+From the mock backend. An overtake on its own is **not** the failure — the honest ego is
+supposed to overtake eventually. The failure is overtaking while a hazard is genuinely
+there, so the run is scored against an omniscient ground-truth decision.
+
+| | honest run | spoofed run |
+|---|---|---|
+| pulls out at | t = 7.0 s | t = 0.65 s |
+| ground truth at that moment | `PASS` | `DO_NOT_PASS` |
+| completes the manoeuvre | yes, back in lane at 15.5 s | no |
+| collision | none | head-on, t = 5.45 s, 12.3 m/s |
+
+```
+attack_caused_unsafe_overtake: true
+attack_caused_collision:       true
+```
+
+**An emergent detail worth keeping.** In the spoofed run the ego *does* detect the
+oncoming car with its own sensors — once it leaves its lane the lead stops occluding it,
+and the warning flips back to `DO_NOT_PASS`. But the manoeuvre is already past the abort
+threshold, so it is too late. That behaviour was not coded; it falls out of the occlusion
+model plus the commitment logic.
+
+---
+
+## Why it is closed-loop
+
+The earlier version of this experiment
+(`~/proj/CarlaNetpp/cooperative_perception_dev/use_case_1/main.py`) staged its collision:
+at `time.time() - starting_time > 7.8` it called `apply_control(throttle=1, steer=-1)` and
+the car swerved into the opposing lane regardless of what any message said. Its "attack"
+was an unrelated GNSS timestamp shift written to a CSV that never touched vehicle
+behaviour — so the identical crash happens with the attack switched off.
+
+Here the ego has no script. Feed it honest messages and it stays put; feed it the forged
+ones and it overtakes, with nothing else different between the two runs. The controllers
+are deliberately crude — pure pursuit plus a proportional speed controller — because
+anything fancier would hide the mechanism behind a black box.
+
+---
+
+## Status
+
+Verified in the mock backend and by the test suite. The **live-CARLA path has not been run
+yet**: road-graph placement on Town01, the `--use-spawn-points` path that reuses spawn
+indices 181/177/163, and the AirSim drone are all still unverified.
+
+## Scene provenance
+
+Map, weather, drone hover pose and spectator framing are reused verbatim from
+`~/proj/CarlaNetpp/cooperative_perception_dev/use_case_1/main.py`:
+
+| | value |
+|---|---|
+| map / weather | `Town01` / `CloudyNoon` |
+| drone hover pose | `Location(392.791443, 107.608482, 14.855516)`, `Rotation(pitch=-27.212101, yaw=-89.532944)` |
+| RSU (impersonated) | same spot at pole height, `z = 6.0`, station id `9001` |
+| spectator | `Location(377.332733, 125.954506, 35.793575)`, `Rotation(pitch=-54.568348, yaw=-0.546539)` |
+| original spawn points | 181 ego · 177 lead · 163 oncoming (alternates 183/219 same lane, 65 opposing) |
+
+The spawn indices are CARLA 0.9.13 and may drift on the 0.9.16 CarlaAir build; in the
+original the traffic manager drove the cars into formation over ~8 s rather than starting
+in it. So placement is derived from the road graph around the same segment by default, and
+`--use-spawn-points` forces the originals.

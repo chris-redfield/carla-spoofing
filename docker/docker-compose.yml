@@ -14,7 +14,11 @@ services:
     image: carla-spoofing:0.1.0
     environment:
       SIM: "1"
-      MAP: "Town10HD"
+      # Town01 is where the do-not-pass scenario is defined. Starting here means
+      # no scenario has to call load_world() at runtime -- that reload has to tear
+      # down a level while a second client (auto_traffic.py) still owns actors and
+      # the AirSim plugin lives in the same engine, and it intermittently hangs.
+      MAP: "${MAP:-Town01}"
       CARLA_PORT: "2000"
       # Window mode is the DEFAULT (on-screen UE4 window). Needs an X server and
       # `xhost +local:` first (scripts/run_sim_gui.sh does that for you). On a

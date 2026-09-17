@@ -52,7 +52,11 @@ if [ "${SIM:-0}" = "1" ]; then
         RENDER_FLAGS="-RenderOffScreen"
         echo "[entrypoint] launching CarlaUE4 ($MAP, quality=$QUALITY) headless on RPC $RPC_PORT ..."
     fi
-    "$BINARY" CarlaUE4 "$MAP" \
+    # Fully-qualified package path: the bare map name ("Town01") is ignored by
+    # this build and the engine silently falls back to GameDefaultMap. If the
+    # path does not resolve the behaviour is the same fallback, so this is never
+    # worse -- and when it works, no runtime level reload is needed at all.
+    "$BINARY" CarlaUE4 "/Game/Carla/Maps/$MAP" \
         -carla-rpc-port="$RPC_PORT" $RENDER_FLAGS -nosound \
         -quality-level="$QUALITY" -TexturePoolSize=2048 -unattended &
     SIM_PID=$!
@@ -70,6 +74,54 @@ if [ "${SIM:-0}" = "1" ]; then
         fi
         sleep 2
     done
+
+    # Load the requested map over RPC.
+    #
+    # This packaged build IGNORES the positional map argument: launched with
+    # `CarlaUE4-Linux-Shipping CarlaUE4 Town01` the server still reports
+    # Town10HD, falling back to GameDefaultMap in CarlaUE4/Config/DefaultEngine.ini.
+    # (CarlaAir.sh has the same bug -- its advertised `./CarlaAir.sh Town03` does
+    # not work either.) So the map is switched here instead.
+    #
+    # The timing matters. load_world() is unreliable in this build once the world
+    # is busy -- it has to tear down a level while other clients own actors and
+    # the AirSim plugin sits in the same UE4 process, and it can hang forever.
+    # Right here it is safe: no traffic yet, the drone has not taken off, and this
+    # is the only client connected. Do NOT move this below the traffic block.
+    if [ -n "${MAP:-}" ]; then
+        MAP="$MAP" RPC_PORT="$RPC_PORT" python -c '
+import carla, os, time
+want = os.environ["MAP"]
+client = carla.Client("127.0.0.1", int(os.environ["RPC_PORT"]))
+client.set_timeout(180.0)
+
+# The RPC socket accepts connections well before the engine has finished
+# booting, and loading a level into a half-initialised engine SEGFAULTS it
+# (observed: "Signal 11 caught" immediately after "CARLA RPC ready"). Wait for
+# the world to actually tick, which only happens once it is really up.
+ready = False
+for _ in range(60):
+    try:
+        client.get_world().wait_for_tick(10.0)
+        ready = True
+        break
+    except Exception:
+        time.sleep(2.0)
+if not ready:
+    raise SystemExit("world never ticked; leaving the map alone")
+time.sleep(8.0)
+
+current = client.get_world().get_map().name.split("/")[-1]
+if current == want:
+    print("[entrypoint] map is %s" % want)
+else:
+    print("[entrypoint] engine loaded %s, switching to %s over RPC ..." % (current, want))
+    client.load_world(want)
+    time.sleep(5.0)
+    print("[entrypoint] map is now %s"
+          % client.get_world().get_map().name.split("/")[-1])
+' || echo "[entrypoint] WARN: could not switch the map to $MAP; continuing on the engine default"
+    fi
 
     # Spawn traffic so an attacker/sender vehicle exists in the world.
     if [ "${SPAWN_TRAFFIC:-1}" = "1" ] && [ -f "$CARLAAIR_DIR/examples/auto_traffic.py" ]; then

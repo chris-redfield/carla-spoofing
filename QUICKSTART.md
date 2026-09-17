@@ -75,7 +75,8 @@ This **downloads the CarlaAir binary (6.85 GB, resumable)**, unpacks it into
 ```bash
 make up
 ```
-Opens the **CarlaAir window on your desktop** with the city (Town10HD), ~10
+Opens the **CarlaAir window on your desktop** with the map (Town01, where the
+do-not-pass scenario lives — `MAP=Town10HD make up` for the city instead), ~10
 vehicles + pedestrians of traffic, and the drone. Leave this terminal running —
 it's the live simulator (CARLA on port 2000, drone/AirSim on 41451).
 

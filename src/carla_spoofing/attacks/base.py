@@ -23,6 +23,10 @@ class AttackResult:
     points_added: int = 0
     points_removed: int = 0
     image_injections: list = field(default_factory=list)  # list of dicts
+    # Identity spoofing: the station id the message CLAIMS vs who really sent it.
+    # Both None for attacks that only edit the object list.
+    impersonated_station_id: Optional[int] = None
+    true_sender_id: Optional[int] = None
     notes: str = ""
 
     def to_dict(self) -> dict:
@@ -33,6 +37,8 @@ class AttackResult:
             "points_added": self.points_added,
             "points_removed": self.points_removed,
             "image_injections": self.image_injections,
+            "impersonated_station_id": self.impersonated_station_id,
+            "true_sender_id": self.true_sender_id,
             "notes": self.notes,
         }
 
