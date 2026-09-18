@@ -124,6 +124,16 @@ RSU_LOCATION: Vec3 = (392.791443, 107.608482, 6.0)
 RSU_STATION_ID = 9001        # infrastructure ids live above the CARLA actor range
 VIRTUAL_DRONE_STATION_ID = 9002   # used when no drone actor exists in the world
 
+# The RSU is otherwise a virtual station -- a reference position CPMs are built
+# from, with no actor in the world. If this blueprint doesn't exist in the
+# running content build, the scenario still runs -- the debug-draw marker
+# below does not depend on it.
+RSU_POLE_BLUEPRINTS = ("static.prop.streetsign04",)
+RSU_TOPPER_BLUEPRINTS = ("static.prop.colacan",)     # sits on top of the pole
+RSU_CAP_BLUEPRINTS = ("static.prop.calibrator",)     # sits on top of the topper
+RSU_TOPPER_HEIGHT_M = 2.8   # roughly the sign pole's height
+RSU_CAP_HEIGHT_M = 0.15     # roughly the can's height
+
 # The original run used CARLA spawn-point indices (181/177/163) and let a traffic
 # manager drive the cars into formation over several seconds. A closed-loop run
 # needs a defined starting formation instead, and those indices are CARLA 0.9.13
@@ -491,6 +501,137 @@ def _derive_transforms(carla, world, cfg):
             "derived from the road graph around the original drone pose")
 
 
+def _spawn_rsu_landmark(carla, world, cfg):
+    """Best-effort physical marker for the RSU, plus a persistent debug beacon.
+
+    The RSU is a virtual station otherwise (see RSU_STATION_ID): a reference
+    position CPMs are built from, with no actor in the world. Without something
+    to look at, the roadside infrastructure whose identity the drone steals is
+    invisible in the recording. Returns ``(actors_spawned, note)``; actors_spawned
+    may be empty if the content build has none of RSU_POLE/TOPPER/CAP_BLUEPRINTS.
+    """
+    bl = world.get_blueprint_library()
+
+    def first_available(names):
+        for name in names:
+            found = bl.filter(name)
+            if found:
+                return found[0]
+        return None
+
+    cmap = world.get_map()
+    anchor = carla.Location(x=cfg.rsu_position[0], y=cfg.rsu_position[1], z=0.5)
+    # Land the pole on the sidewalk, not the lane cars actually drive on.
+    # RSU_LOCATION is a logical reference point (antenna coverage), not a
+    # surveyed prop placement, so it can land mid-lane on some map stretches.
+    side_wp = cmap.get_waypoint(anchor, project_to_road=True,
+                                lane_type=carla.LaneType.Sidewalk)
+    if side_wp is not None:
+        land_x = side_wp.transform.location.x
+        land_y = side_wp.transform.location.y
+        ground_z = side_wp.transform.location.z
+        yaw = side_wp.transform.rotation.yaw
+    else:
+        # No sidewalk lane modelled here (narrow paths/alleys sometimes have
+        # none) -- push sideways off the driving lane's edge instead of
+        # planting the landmark where traffic passes.
+        drive_wp = cmap.get_waypoint(anchor, project_to_road=True,
+                                     lane_type=carla.LaneType.Driving)
+        if drive_wp is not None:
+            right = drive_wp.transform.get_right_vector()
+            clearance = drive_wp.lane_width / 2.0 + 1.5
+            land_x = drive_wp.transform.location.x + right.x * clearance
+            land_y = drive_wp.transform.location.y + right.y * clearance
+            ground_z = drive_wp.transform.location.z
+            yaw = drive_wp.transform.rotation.yaw
+        else:
+            land_x, land_y, ground_z, yaw = (cfg.rsu_position[0],
+                                             cfg.rsu_position[1], 0.0, 0.0)
+
+    actors = []
+    pole = None
+
+    def spawn_metallic(bp, transform, **kwargs):
+        # Best effort: generic static-prop blueprints don't expose material
+        # sliders over the Python API (that lives baked in the .uasset, not
+        # runtime-tunable) -- only apply if this particular blueprint happens
+        # to have one, rather than assume every prop supports it.
+        for attr_name, value in (("metallic", "1.0"), ("roughness", "0.0")):
+            if bp.has_attribute(attr_name):
+                bp.set_attribute(attr_name, value)
+        actor = world.try_spawn_actor(bp, transform, **kwargs)
+        if actor is not None:
+            actor.set_simulate_physics(False)   # a prop, not a projectile
+        return actor
+
+    pole_bp = first_available(RSU_POLE_BLUEPRINTS)
+    if pole_bp is not None:
+        pole_tf = carla.Transform(
+            carla.Location(x=land_x, y=land_y, z=ground_z),
+            carla.Rotation(yaw=yaw))
+        pole = spawn_metallic(pole_bp, pole_tf)
+        if pole is not None:
+            actors.append(pole)
+
+    topper = None
+    topper_bp = first_available(RSU_TOPPER_BLUEPRINTS)
+    if topper_bp is not None:
+        if pole is not None:
+            # Relative to the pole, not the world -- otherwise gravity (props
+            # simulate physics by default) drops it straight onto the road the
+            # instant the world ticks, since nothing is holding it up there.
+            topper_tf = carla.Transform(carla.Location(z=RSU_TOPPER_HEIGHT_M))
+            topper = spawn_metallic(topper_bp, topper_tf, attach_to=pole,
+                                    attachment_type=carla.AttachmentType.Rigid)
+        else:
+            topper_tf = carla.Transform(
+                carla.Location(x=land_x, y=land_y, z=ground_z + RSU_TOPPER_HEIGHT_M),
+                carla.Rotation(yaw=yaw))
+            topper = spawn_metallic(topper_bp, topper_tf)
+        if topper is not None:
+            actors.append(topper)
+
+    cap_bp = first_available(RSU_CAP_BLUEPRINTS)
+    if cap_bp is not None:
+        if topper is not None:
+            cap_tf = carla.Transform(carla.Location(z=RSU_CAP_HEIGHT_M))
+            cap = spawn_metallic(cap_bp, cap_tf, attach_to=topper,
+                                 attachment_type=carla.AttachmentType.Rigid)
+        elif pole is not None:
+            cap_tf = carla.Transform(
+                carla.Location(z=RSU_TOPPER_HEIGHT_M + RSU_CAP_HEIGHT_M))
+            cap = spawn_metallic(cap_bp, cap_tf, attach_to=pole,
+                                 attachment_type=carla.AttachmentType.Rigid)
+        else:
+            cap_tf = carla.Transform(
+                carla.Location(x=land_x, y=land_y,
+                               z=ground_z + RSU_TOPPER_HEIGHT_M + RSU_CAP_HEIGHT_M),
+                carla.Rotation(yaw=yaw))
+            cap = spawn_metallic(cap_bp, cap_tf)
+        if cap is not None:
+            actors.append(cap)
+
+    stack_top_z = ground_z + RSU_TOPPER_HEIGHT_M + RSU_CAP_HEIGHT_M
+    base_loc = carla.Location(x=land_x, y=land_y, z=ground_z)
+    top_loc = carla.Location(x=land_x, y=land_y, z=stack_top_z)
+    # A thick vertical beacon line plus a bright marker at the top make the
+    # landmark findable at a distance, without a text tag cluttering the view.
+    world.debug.draw_line(base_loc, top_loc, thickness=0.08,
+                          life_time=cfg.duration_s + 5.0,
+                          color=carla.Color(255, 200, 0))
+    world.debug.draw_point(top_loc, size=0.2, life_time=cfg.duration_s + 5.0,
+                           color=carla.Color(255, 40, 40))
+
+    parts = [a.type_id for a in actors]
+    landmark_desc = (" + ".join(parts) if parts else
+                     "no matching prop blueprints in this content build")
+    note = (f"RSU landmark: {landmark_desc} at "
+            f"({land_x:.1f}, {land_y:.1f}, {ground_z:.1f}) "
+            f"({'sidewalk' if side_wp is not None else 'lane shoulder'}), "
+            f"beacon drawn (no text label)")
+    return actors, note
+
+
 def _derive_drone_pose(carla, world, cfg):
     """Where the drone hovers: ``drone_back_m`` behind the ego start, facing the
 
@@ -658,18 +799,24 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
 
     existing = [a for a in world.get_actors().filter("vehicle.*")
                 if "drone" not in a.type_id.lower()]
+    # Background traffic (e.g. from `make up`) can also include walkers; those
+    # aren't part of this scene and would otherwise wander into frame.
+    existing += list(world.get_actors().filter("walker.pedestrian.*"))
+    existing += list(world.get_actors().filter("controller.ai.walker"))
     if existing:
         if cfg.clean_vehicles:
-            print(f"[dnp] removing {len(existing)} pre-existing vehicles ...")
+            print(f"[dnp] removing {len(existing)} pre-existing vehicles/walkers ...")
             for a in existing:
                 try:
+                    if a.type_id == "controller.ai.walker":
+                        a.stop()
                     a.destroy()
                 except Exception:
                     pass
         else:
             outcome.notes.append(
-                f"--keep-vehicles: {len(existing)} other vehicles left in the "
-                "world; they may disturb the scene.")
+                f"--keep-vehicles: {len(existing)} other vehicles/walkers left "
+                "in the world; they may disturb the scene.")
             print("[dnp] WARNING: " + outcome.notes[-1])
 
     # Put the drone in the scene before synchronous mode: AirSim's controller
@@ -701,6 +848,11 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         ego_tf, lead_tf, onc_tf, placement = _derive_transforms(carla, world, cfg)
         outcome.notes.append(f"placement: {placement}")
         print(f"[dnp] placement: {placement}")
+
+        rsu_actors, rsu_note = _spawn_rsu_landmark(carla, world, cfg)
+        spawned.extend(rsu_actors)
+        outcome.notes.append(rsu_note)
+        print(f"[dnp] {rsu_note}")
 
         bl = world.get_blueprint_library()
         def bp(name, fallback="vehicle.*"):
@@ -818,16 +970,25 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
                 seq += 1
 
             ego_st = _ego_state(states, ego.id, ego_ctrl.p.cruise_speed_mps)
-            ego.apply_control(
-                ego_ctrl.step(ego_st, decision, acted_objects,
-                              cfg.tick_s, sim_time).to_carla())
-            for actor, ctrl in ((lead, lead_ctrl), (onc, onc_ctrl)):
-                st = next((s for s in states if s.object_id == actor.id), None)
-                if st is None:
-                    continue
-                actor.apply_control(ctrl.step(
-                    EgoState(actor.id, st.position, st.yaw_deg, st.velocity),
-                    cfg.tick_s).to_carla())
+            if collisions:
+                # Post-impact, let physics (momentum, friction) settle the wreck
+                # instead of the controllers still commanding throttle/steer as
+                # if nothing happened -- that reads as cars grinding through
+                # each other rather than an actual crash.
+                brake_cmd = VehicleCommand(brake=1.0).to_carla()
+                for actor in (ego, lead, onc):
+                    actor.apply_control(brake_cmd)
+            else:
+                ego.apply_control(
+                    ego_ctrl.step(ego_st, decision, acted_objects,
+                                  cfg.tick_s, sim_time).to_carla())
+                for actor, ctrl in ((lead, lead_ctrl), (onc, onc_ctrl)):
+                    st = next((s for s in states if s.object_id == actor.id), None)
+                    if st is None:
+                        continue
+                    actor.apply_control(ctrl.step(
+                        EgoState(actor.id, st.position, st.yaw_deg, st.velocity),
+                        cfg.tick_s).to_carla())
 
             outcome.max_lateral_offset_m = max(outcome.max_lateral_offset_m,
                                                abs(ego_ctrl.lateral_offset))
