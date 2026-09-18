@@ -5,9 +5,11 @@ running V2X spoofing attacks, in a handful of `make` commands. No prior knowledg
 of the project is assumed.
 
 > **What this is:** autonomous-vehicle cybersecurity **research in simulation**.
-> A malicious vehicle broadcasts *fake* cooperative-perception messages to its
-> neighbours (a phantom car, or a real object erased). Everything runs in Docker
-> for reproducibility. See [README.md](README.md) for the concepts.
+> An attacker broadcasts *fake* cooperative-perception messages to its neighbours
+> — a phantom car, or a real object erased. In the headline scenario a **drone
+> impersonating a Road Side Unit** erases an oncoming car, and the victim
+> overtakes into it. Everything runs in Docker for reproducibility. See
+> [README.md](README.md) for the concepts.
 
 ---
 
@@ -90,7 +92,48 @@ it's the live simulator (CARLA on port 2000, drone/AirSim on 41451).
 
 ---
 
-## 4. Run a spoofing attack (in a second terminal)
+## 4. Watch the attack cause a crash (in a second terminal)
+
+```bash
+cd carla-spoofing
+make do-not-pass
+```
+
+The **Do-Not-Pass Warning** scenario, and the clearest thing to look at first. A
+drone hovering at the roadside impersonates an RSU and deletes the oncoming car
+from what it reports. The victim's overtaking assistant, reasoning correctly over
+a poisoned world model, concludes the road is clear.
+
+It runs **twice**, and the comparison is the point:
+
+| | what you see |
+|---|---|
+| **honest** | the ego waits behind the slow lead while the oncoming car passes, *then* overtakes safely |
+| **spoofed** | the ego pulls out almost immediately and hits the oncoming car head-on |
+
+Nothing differs between the two runs but the messages — the ego is driven by its
+own controller, with no scripted steering anywhere. After the crash the scene is
+held on screen for a few seconds before the vehicles are cleared.
+
+```bash
+make do-not-pass RUN=spoofed   # just the crash
+make do-not-pass RUN=honest    # just the safe baseline
+make do-not-pass-mock          # the same closed loop with no simulator at all
+```
+
+Results land in `out/do_not_pass/`:
+
+| File | What it is |
+|---|---|
+| `comparison.json` | the verdict — `attack_caused_collision`, `attack_caused_unsafe_overtake` |
+| `<run>/do_not_pass_decisions.csv` | one row per decision: what the ego concluded, what it *would* have concluded from the honest messages, and the ground truth |
+| `<run>/messages.csv` | who transmitted what, which station id they **claimed**, and what was deleted |
+
+Full walkthrough with diagrams: [docs/do_not_pass_spoofing.md](docs/do_not_pass_spoofing.md).
+
+---
+
+## 5. Run the multi-vehicle spoofing attack
 
 ```bash
 cd carla-spoofing
@@ -114,7 +157,7 @@ Open `out/messages.csv` in any spreadsheet to see the attack.
 
 ---
 
-## 5. Stop
+## 6. Stop
 
 ```bash
 make down        # stop the simulator container
@@ -130,8 +173,11 @@ make toolkit   # install NVIDIA container toolkit (once, sudo)
 make setup     # download + extract CarlaAir + build image
 make up        # start sim WITH a window (default)
 make headless  # start sim with NO window (servers)
-make spoof     # attack the live sim: default 60 s @ 1 Hz/vehicle
+make do-not-pass       # drone-as-fake-RSU crash scenario (RUN=honest|spoofed|both)
+make do-not-pass-mock  # the same, with no simulator at all
+make spoof     # multi-vehicle attack on the live sim: default 60 s @ 1 Hz/vehicle
                # (ATTACK=fake_object|remove_object|camera, RATE=, DURATION=)
+make test      # unit tests (no sim, no GPU)
 make logs      # tail the simulator logs
 make down      # stop the simulator
 make help      # list all targets
