@@ -614,17 +614,13 @@ def _spawn_rsu_landmark(carla, world, cfg):
     stack_top_z = ground_z + RSU_TOPPER_HEIGHT_M + RSU_CAP_HEIGHT_M
     base_loc = carla.Location(x=land_x, y=land_y, z=ground_z)
     top_loc = carla.Location(x=land_x, y=land_y, z=stack_top_z)
-    label_loc = carla.Location(x=land_x, y=land_y, z=stack_top_z + 0.5)
-    # A plain text tag is easy to lose at a distance or in bright daylight --
-    # a thick vertical beacon line plus a bright marker at the top make the
-    # landmark findable well before the props themselves are legible.
+    # A thick vertical beacon line plus a bright marker at the top make the
+    # landmark findable at a distance, without a text tag cluttering the view.
     world.debug.draw_line(base_loc, top_loc, thickness=0.08,
                           life_time=cfg.duration_s + 5.0,
                           color=carla.Color(255, 200, 0))
     world.debug.draw_point(top_loc, size=0.2, life_time=cfg.duration_s + 5.0,
                            color=carla.Color(255, 40, 40))
-    world.debug.draw_string(label_loc, "RSU", life_time=cfg.duration_s + 5.0,
-                            color=carla.Color(255, 200, 0))
 
     parts = [a.type_id for a in actors]
     landmark_desc = (" + ".join(parts) if parts else
@@ -632,7 +628,7 @@ def _spawn_rsu_landmark(carla, world, cfg):
     note = (f"RSU landmark: {landmark_desc} at "
             f"({land_x:.1f}, {land_y:.1f}, {ground_z:.1f}) "
             f"({'sidewalk' if side_wp is not None else 'lane shoulder'}), "
-            f"beacon + debug label always drawn")
+            f"beacon drawn (no text label)")
     return actors, note
 
 
@@ -803,18 +799,24 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
 
     existing = [a for a in world.get_actors().filter("vehicle.*")
                 if "drone" not in a.type_id.lower()]
+    # Background traffic (e.g. from `make up`) can also include walkers; those
+    # aren't part of this scene and would otherwise wander into frame.
+    existing += list(world.get_actors().filter("walker.pedestrian.*"))
+    existing += list(world.get_actors().filter("controller.ai.walker"))
     if existing:
         if cfg.clean_vehicles:
-            print(f"[dnp] removing {len(existing)} pre-existing vehicles ...")
+            print(f"[dnp] removing {len(existing)} pre-existing vehicles/walkers ...")
             for a in existing:
                 try:
+                    if a.type_id == "controller.ai.walker":
+                        a.stop()
                     a.destroy()
                 except Exception:
                     pass
         else:
             outcome.notes.append(
-                f"--keep-vehicles: {len(existing)} other vehicles left in the "
-                "world; they may disturb the scene.")
+                f"--keep-vehicles: {len(existing)} other vehicles/walkers left "
+                "in the world; they may disturb the scene.")
             print("[dnp] WARNING: " + outcome.notes[-1])
 
     # Put the drone in the scene before synchronous mode: AirSim's controller
