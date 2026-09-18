@@ -6,6 +6,9 @@ ATTACK ?= fake_object
 RATE ?= 1
 DURATION ?= 60
 RUN ?= both
+# Drone hover spot, metres behind the ego start (negative = in front of it).
+# -55 puts it back over the RSU, directly above the crash, where it used to sit.
+DRONE_BACK ?= -2.5
 
 .PHONY: help doctor toolkit setup download extract build up gui headless \
         spoof do-not-pass do-not-pass-mock test down logs clean
@@ -45,17 +48,19 @@ spoof:           ## Attack the live sim: make spoof [ATTACK=remove_object] [RATE
 	  --port 2000 --attack $(ATTACK) --rate $(RATE) --duration $(DURATION) \
 	  --out /workspace/out
 
-do-not-pass:     ## Do-Not-Pass spoofing vs the live sim: make do-not-pass [RUN=both]
+do-not-pass:     ## Do-Not-Pass spoofing vs the live sim: make do-not-pass [RUN=both] [DRONE_BACK=-2.5]
                  ## Prepares its own world (loads Town01, clears traffic) — just 'make up' first.
 	$(COMPOSE) run --rm spoofing \
 	  python -m carla_spoofing.scenarios.do_not_pass_spoofing \
 	  --mode carla --host carla-sim --port 2000 --run $(RUN) \
+	  --drone-back $(DRONE_BACK) \
 	  --out /workspace/out/do_not_pass
 
 do-not-pass-mock: ## Same scenario with no simulator at all (kinematic mock)
 	$(COMPOSE) run --rm --no-deps spoofing \
 	  python -m carla_spoofing.scenarios.do_not_pass_spoofing \
-	  --mode mock --run $(RUN) --out /workspace/out/do_not_pass
+	  --mode mock --run $(RUN) --drone-back $(DRONE_BACK) \
+	  --out /workspace/out/do_not_pass
 
 test:            ## Run the unit tests (no sim, no GPU)
 	PYTHONPATH=src python -m pytest tests/ -q

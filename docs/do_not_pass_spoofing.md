@@ -178,6 +178,54 @@ The `offset` is the measured AirSim-to-CARLA frame difference. `--no-fly-drone` 
 the whole step — the drone's pose is cosmetic, since a forged CPM claims the
 impersonated station's position rather than the attacker's.
 
+### Where the drone hovers — `--drone-back`
+
+The surveyed pose sits directly over the RSU anchor, which is roughly where the ego
+ends up when the spoofed overtake goes wrong. The drone therefore hovered right on
+top of the crash, with the whole scene squeezed underneath it. The hover spot is now
+derived from the road graph instead, a set distance **behind the ego's start**:
+
+```
+            drone ▾ (default: 2.5 m in front of the ego start)
+   ego ───────────────► lead ──────────────► · · · ◄──────── oncoming
+   -55m     -52.5m       -25m                RSU 0m           +55m
+   └────────────── looking down the road, this way ──────────►
+```
+
+Distances are metres along the road from the RSU anchor; `--drone-back` counts
+**backwards from the ego's start**, so a negative value is *in front* of it.
+
+Only the position *along* the road changes. Altitude and the sideways offset from the
+lane centre are carried over from the surveyed pose, measured in the anchor waypoint's
+own right-vector and re-laid against the hover waypoint's, so the drone stays over the
+same verge at the same height even if the segment curves. Its yaw is taken from the
+lane heading, which is by construction the direction the ego drives.
+
+| | |
+|---|---|
+| `--drone-back -2.5` | default — just ahead of the ego, whole manoeuvre in front of the camera |
+| `--drone-back 15` | behind the ego, wider shot |
+| `--drone-back -55` | the surveyed pose, directly over the RSU and over the crash |
+
+The default was settled by eye: 15 m behind the ego overshot, so it sits a quarter
+of the way back toward the surveyed pose.
+
+**Backing off has a limit, and the scenario enforces it.** The attacker forges by
+*deleting* the oncoming car from what it honestly perceives. Park it far enough back
+that the car was never within its 160 m perception range and there is nothing to
+delete — yet the run still ends in a collision, because an impersonated message
+replaces the RSU's genuine one whether or not the attacker edited it. The outcome then
+looks like a successful attack while actually being an artifact of sensor range, with
+the only evidence an empty `removed_ids` column. Any configuration that would do this
+is called out before the run starts:
+
+```
+[dnp] WARNING: the oncoming car starts 190 m from the drone, beyond its 160 m
+perception range, so early forged messages have nothing to suppress -- any collision
+is a sensor-range artifact, not the attack. Reduce --drone-back (or --oncoming-ahead),
+or raise the drone's range.
+```
+
 ### Terminal 2 — the scenario
 
 ```bash
@@ -294,9 +342,6 @@ anything fancier would hide the mechanism behind a black box.
 **Verified end to end in live CARLA on 2026-09-17**, plus the mock backend and the test
 suite. Road-graph placement, the drone teleport and the closed-loop collision all work.
 
-Still unverified: the `--use-spawn-points` path that reuses the original CarlaNetpp spawn
-indices 181/177/163.
-
 Measured on the live run: the AirSim-to-CARLA frame offset is `(-203.0, -188.1, 1.9)` —
 AirSim's origin sits ~275 m from CARLA's, which is why a drone spawn pose expressed in raw
 CARLA coordinates cannot work.
@@ -309,12 +354,13 @@ Map, weather, drone hover pose and spectator framing are reused verbatim from
 | | value |
 |---|---|
 | map / weather | `Town01` / `CloudyNoon` |
-| drone hover pose | `Location(392.791443, 107.608482, 14.855516)`, `Rotation(pitch=-27.212101, yaw=-89.532944)` |
+| drone hover pose | `Location(392.791443, 107.608482, 14.855516)`, `Rotation(pitch=-27.212101, yaw=-89.532944)` — now the anchor for altitude and roadside offset only; the position along the road comes from `--drone-back` |
 | RSU (impersonated) | same spot at pole height, `z = 6.0`, station id `9001` |
 | spectator | `Location(377.332733, 125.954506, 35.793575)`, `Rotation(pitch=-54.568348, yaw=-0.546539)` |
-| original spawn points | 181 ego · 177 lead · 163 oncoming (alternates 183/219 same lane, 65 opposing) |
+| original spawn points | 181 ego · 177 lead · 163 oncoming — recorded for provenance, **not used** |
 
-The spawn indices are CARLA 0.9.13 and may drift on the 0.9.16 CarlaAir build; in the
-original the traffic manager drove the cars into formation over ~8 s rather than starting
-in it. So placement is derived from the road graph around the same segment by default, and
-`--use-spawn-points` forces the originals.
+Those indices are not reused. They are CARLA 0.9.13 numbering that may point anywhere on
+this 0.9.16 CarlaAir build, and in the original the traffic manager drove the cars into
+formation over ~8 s rather than starting in it — a closed-loop run needs a defined
+starting formation. Placement is therefore always derived from the road graph around the
+same segment.

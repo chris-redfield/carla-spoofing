@@ -130,3 +130,30 @@ def test_closed_loop_mock_only_crashes_under_attack(tmp_path):
     assert verdict["attack_caused_collision"] is True
     assert verdict["honest_unsafe_overtake"] is False
     assert verdict["honest_collision"] is False
+
+
+def test_drone_range_warning_fires_only_when_the_forgery_is_vacuous():
+    """A drone backed off past its own perception range makes the run a lie.
+
+    It still ends in a collision -- an impersonated message replaces the RSU's
+    either way -- but nothing was actually suppressed, so the crash is a sensor
+    range artifact rather than the attack. The run has to say so.
+    """
+    from carla_spoofing.scenarios.do_not_pass_spoofing import (
+        ScenarioConfig, _drone_range_warning)
+
+    assert _drone_range_warning(ScenarioConfig()) is None          # default is safe
+    assert _drone_range_warning(ScenarioConfig(drone_back_m=49)) is None   # 110+49 < 160
+    assert _drone_range_warning(ScenarioConfig(drone_back_m=51)) is not None
+    assert "160" in _drone_range_warning(ScenarioConfig(drone_back_m=80))
+
+
+def test_moving_the_drone_back_does_not_disarm_the_attack(tmp_path):
+    """The camera move is cosmetic: the verdict must be unchanged."""
+    from carla_spoofing.scenarios.do_not_pass_spoofing import main
+    import json
+    assert main(["--mode", "mock", "--run", "both", "--sink", "null",
+                 "--drone-back", "40", "--out", str(tmp_path)]) == 0
+    verdict = json.loads((tmp_path / "comparison.json").read_text())["verdict"]
+    assert verdict["attack_caused_collision"] is True
+    assert verdict["honest_collision"] is False

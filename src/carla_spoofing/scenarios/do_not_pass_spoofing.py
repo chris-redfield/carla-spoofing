@@ -98,6 +98,23 @@ DRONE_ROTATION = (-27.212101, -89.532944, -0.025725)      # pitch, yaw, roll
 # offset rather than edited into DRONE_ROTATION, so the surveyed pose above stays
 # verbatim from the CarlaNetpp run.
 DRONE_VIEW_YAW_DEG = DRONE_ROTATION[1] + 180.0            # -89.53 -> 90.47
+
+# The surveyed pose above sits directly over the RSU anchor -- which is also,
+# give or take, where the ego ends up when the spoofed overtake goes wrong, so
+# the drone hovers right on top of the crash and the whole scene is squeezed
+# under it. The hover spot is therefore derived from the road graph instead:
+# DRONE_BACK_M metres BEHIND the ego's start, looking down the road the way the
+# scene runs, so the camera has the ego, the lead, the overtake and the oncoming
+# car laid out in front of it. Altitude and the roadside lateral offset are still
+# taken from the surveyed pose, so the drone stays the same height over the same
+# verge -- only its position along the road changes.
+#
+# The value is a framing choice, settled by eye: pulling the drone 15 m behind the
+# ego (70 m back from the RSU) overshot, so it sits a quarter of the way back
+# toward the surveyed pose -- 52.5 m from the RSU, which lands it 2.5 m in FRONT
+# of where the ego starts. Hence the negative sign: negative is forward.
+# `--drone-back -55` (i.e. -ego_back) returns it to the surveyed pose over the RSU.
+DRONE_BACK_M = -2.5
 SPECTATOR_LOCATION: Vec3 = (377.332733, 125.954506, 35.793575)
 SPECTATOR_ROTATION = (-54.568348, -0.546539, -0.018311)
 
@@ -107,13 +124,11 @@ RSU_LOCATION: Vec3 = (392.791443, 107.608482, 6.0)
 RSU_STATION_ID = 9001        # infrastructure ids live above the CARLA actor range
 VIRTUAL_DRONE_STATION_ID = 9002   # used when no drone actor exists in the world
 
-# Spawn-point indices from the original run. They positioned cars for a traffic
-# manager to drive into formation over several seconds; a closed-loop run needs a
-# defined starting formation instead, so placement is derived from the road graph
-# around the same segment by default. --use-spawn-points forces the originals.
-SPAWN_EGO, SPAWN_LEAD, SPAWN_ONCOMING = 181, 177, 163
-ALT_SAME_LANE = (183, 219)
-ALT_OPPOSING_LANE = (65,)
+# The original run used CARLA spawn-point indices (181/177/163) and let a traffic
+# manager drive the cars into formation over several seconds. A closed-loop run
+# needs a defined starting formation instead, and those indices are CARLA 0.9.13
+# numbering that may point anywhere on this 0.9.16 build -- so placement is always
+# derived from the road graph around the same segment. See _derive_transforms.
 
 # Mock-backend ids (no CARLA actors involved).
 MOCK_EGO_ID, MOCK_LEAD_ID, MOCK_ONCOMING_ID = 101, 102, 103
@@ -149,12 +164,12 @@ class ScenarioConfig:
 
     # Initial formation, measured along the road from the RSU anchor.
     ego_back_m: float = 55.0
+    drone_back_m: float = DRONE_BACK_M   # hover spot, behind the ego start
     lead_ahead_m: float = 30.0
     oncoming_ahead_m: float = 110.0
     lead_speed_kmh: float = 18.0
     oncoming_speed_kmh: float = 35.0
 
-    use_spawn_points: bool = False
     clean_vehicles: bool = True
     out_dir: str = "out/do_not_pass"
     rsu_position: Vec3 = RSU_LOCATION
@@ -340,7 +355,13 @@ def run_mock(cfg: ScenarioConfig, sink, msg_writer, dec_writer) -> Outcome:
     outcome = Outcome(run=cfg.run, mode="mock")
     lane_y, opp_y = 0.0, -3.5
     cfg.rsu_position = (cfg.ego_back_m, -8.0, 6.0)
-    cfg.drone_position = (cfg.ego_back_m, -10.0, 15.0)
+    # Mock ego starts at x=0 and drives +x, so "behind the ego" is -x. Mirrors
+    # the road-graph derivation the CARLA backend does (_derive_drone_pose).
+    cfg.drone_position = (-cfg.drone_back_m, -10.0, 15.0)
+    warning = _drone_range_warning(cfg)
+    if warning:
+        print("[dnp] " + warning)
+        outcome.notes.append(warning)
 
     ego_v = KinematicVehicle(MOCK_EGO_ID, position=(0.0, lane_y, 0.0), yaw_deg=0.0,
                              speed=OvertakeParams().cruise_speed_mps)
@@ -470,14 +491,94 @@ def _derive_transforms(carla, world, cfg):
             "derived from the road graph around the original drone pose")
 
 
-def _spawn_point_transforms(carla, world, cfg):
-    points = world.get_map().get_spawn_points()
-    idx = (SPAWN_EGO, SPAWN_LEAD, SPAWN_ONCOMING)
-    if max(idx) >= len(points):
-        raise SystemExit(f"--use-spawn-points: {MAP_NAME} in this build has only "
-                         f"{len(points)} spawn points, need index {max(idx)}.")
-    return (points[idx[0]], points[idx[1]], points[idx[2]],
-            f"original CarlaNetpp spawn points {idx}")
+def _derive_drone_pose(carla, world, cfg):
+    """Where the drone hovers: ``drone_back_m`` behind the ego start, facing the
+
+    way the scene runs. Returns ``(position, yaw_deg, note)``.
+
+    Only the position ALONG the road is derived. The height and the sideways
+    offset from the lane centre are carried over from the surveyed CarlaNetpp
+    pose, so the drone still hovers over the same verge at the same altitude --
+    it just sits further back, where the whole manoeuvre is in front of it
+    instead of underneath it.
+
+    The offset is measured in the anchor waypoint's own right-vector and re-laid
+    against the hover waypoint's, rather than added as a world-frame delta, so
+    the drone stays on the same SIDE of the road if the segment curves between
+    the two points.
+
+    Best effort, like everything about the drone's physical pose: if the road
+    graph gives nothing back, the surveyed pose is used unchanged.
+    """
+    fallback = (cfg.drone_position, DRONE_VIEW_YAW_DEG,
+                "surveyed CarlaNetpp hover pose (road graph unavailable)")
+    cmap = world.get_map()
+    anchor = carla.Location(x=cfg.rsu_position[0], y=cfg.rsu_position[1], z=0.5)
+    anchor_wp = cmap.get_waypoint(anchor, project_to_road=True,
+                                  lane_type=carla.LaneType.Driving)
+    if anchor_wp is None:
+        return fallback
+
+    # Signed distance from the lane centre to the surveyed pose, positive to the
+    # lane's right. DRONE_LOCATION, not cfg.drone_position: this is a property of
+    # the surveyed spot, and must not drift if the config pose was overridden.
+    right = anchor_wp.transform.get_right_vector()
+    dx = DRONE_LOCATION[0] - anchor_wp.transform.location.x
+    dy = DRONE_LOCATION[1] - anchor_wp.transform.location.y
+    lateral = dx * right.x + dy * right.y
+
+    # previous() walks back against the direction of travel, so ego_back + drone_back
+    # is the distance from the anchor. A negative --drone-back moves it forward again.
+    back_m = cfg.ego_back_m + cfg.drone_back_m
+    if back_m > 0:
+        hops = anchor_wp.previous(back_m)
+    else:
+        hops = anchor_wp.next(-back_m) if back_m < 0 else [anchor_wp]
+    if not hops:
+        return fallback
+    hover_wp = hops[0]
+
+    hover_right = hover_wp.transform.get_right_vector()
+    position = (hover_wp.transform.location.x + hover_right.x * lateral,
+                hover_wp.transform.location.y + hover_right.y * lateral,
+                DRONE_LOCATION[2])
+    # The lane's own heading IS the direction the ego drives, so facing it points
+    # the drone down the road at the scene rather than at the scenery.
+    yaw = hover_wp.transform.rotation.yaw
+    note = (f"drone hover {cfg.drone_back_m:.0f} m behind the ego start "
+            f"({back_m:.0f} m back from the RSU), {abs(lateral):.1f} m "
+            f"{'right' if lateral >= 0 else 'left'} of the lane centre at "
+            f"{position[2]:.1f} m, facing {yaw:.1f} deg")
+
+    warning = _drone_range_warning(cfg)
+    if warning:
+        note += " -- " + warning
+    return position, yaw, note
+
+
+def _drone_range_warning(cfg: ScenarioConfig) -> Optional[str]:
+    """Flag a drone parked too far back for its own forgery to mean anything.
+
+    Retreating the drone for a better camera angle is not free. The attacker
+    forges by DELETING the oncoming car from what it honestly perceives, so once
+    it has backed off far enough that the car was never in range to begin with,
+    there is nothing to delete -- and the run still ends in a collision, because
+    an impersonated message replaces the RSU's genuine one whether or not the
+    attacker edited it.
+
+    That is the dangerous case: the outcome looks like a successful attack while
+    actually being an artifact of the attacker's sensor range, and the evidence
+    is buried in an empty ``removed_ids`` column. Both backends call this so the
+    run says it out loud instead.
+    """
+    to_oncoming = cfg.oncoming_ahead_m + cfg.drone_back_m
+    if to_oncoming <= cfg.drone_range_m:
+        return None
+    return (f"WARNING: the oncoming car starts {to_oncoming:.0f} m from the drone, "
+            f"beyond its {cfg.drone_range_m:.0f} m perception range, so early "
+            f"forged messages have nothing to suppress -- any collision is a "
+            f"sensor-range artifact, not the attack. Reduce --drone-back (or "
+            f"--oncoming-ahead), or raise the drone's range.")
 
 
 def _ensure_map(client, map_name: str, rpc_timeout: float):
@@ -574,9 +675,15 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
     # Put the drone in the scene before synchronous mode: AirSim's controller
     # needs the sim stepping freely to actually fly there. Cosmetic for the
     # attack itself, but the whitepaper scene has the drone hovering roadside.
+    # Derived even when the drone is not flown: the pose is also the reference
+    # position of the CPMs the attacker transmits.
+    cfg.drone_position, drone_yaw, hover_note = _derive_drone_pose(carla, world, cfg)
+    print(f"[dnp] {hover_note}")
+    outcome.notes.append(hover_note)
+
     if not args.no_fly_drone:
         status = place_drone_at(world, args.host, cfg.drone_position,
-                                yaw_deg=DRONE_VIEW_YAW_DEG,
+                                yaw_deg=drone_yaw,
                                 timeout_s=args.drone_timeout)
         print(f"[dnp] {status}")
         outcome.notes.append(status)
@@ -591,10 +698,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         settings.fixed_delta_seconds = cfg.tick_s
         world.apply_settings(settings)
 
-        if cfg.use_spawn_points:
-            ego_tf, lead_tf, onc_tf, placement = _spawn_point_transforms(carla, world, cfg)
-        else:
-            ego_tf, lead_tf, onc_tf, placement = _derive_transforms(carla, world, cfg)
+        ego_tf, lead_tf, onc_tf, placement = _derive_transforms(carla, world, cfg)
         outcome.notes.append(f"placement: {placement}")
         print(f"[dnp] placement: {placement}")
 
@@ -823,9 +927,9 @@ def _one_run(args, run_name: str) -> dict:
     cfg = ScenarioConfig(
         run=run_name, duration_s=args.duration, tick_s=args.tick,
         message_rate_hz=args.rate, ego_back_m=args.ego_back,
+        drone_back_m=args.drone_back,
         lead_ahead_m=args.lead_ahead, oncoming_ahead_m=args.oncoming_ahead,
         lead_speed_kmh=args.lead_speed, oncoming_speed_kmh=args.oncoming_speed,
-        use_spawn_points=args.use_spawn_points,
         clean_vehicles=not args.keep_vehicles,
         out_dir=os.path.join(args.out, run_name))
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -901,14 +1005,16 @@ def main(argv=None):
     p.add_argument("--rate", type=float, default=1.0, help="CPM rate in Hz")
     p.add_argument("--ego-back", type=float, default=55.0,
                    help="ego start distance behind the RSU anchor, metres")
+    p.add_argument("--drone-back", type=float, default=DRONE_BACK_M,
+                   help="where the drone hovers, metres BEHIND the ego start "
+                        "(default %(default)s, i.e. just in front of it). Bigger "
+                        "pulls the camera back off the scene, negative pushes it "
+                        "forward into it; --drone-back -55 (= -ego-back) is the "
+                        "surveyed pose over the RSU, on top of the overtake")
     p.add_argument("--lead-ahead", type=float, default=30.0)
     p.add_argument("--oncoming-ahead", type=float, default=110.0)
     p.add_argument("--lead-speed", type=float, default=18.0, help="km/h")
     p.add_argument("--oncoming-speed", type=float, default=35.0, help="km/h")
-    p.add_argument("--use-spawn-points", action="store_true",
-                   help=f"use the original CarlaNetpp spawn points "
-                        f"{(SPAWN_EGO, SPAWN_LEAD, SPAWN_ONCOMING)} instead of "
-                        f"deriving the formation from the road graph")
     p.add_argument("--no-fly-drone", action="store_true",
                    help="leave the AirSim drone wherever it is (default: place it "
                         "at the roadside fake-RSU pose before the scene starts)")
