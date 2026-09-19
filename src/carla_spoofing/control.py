@@ -31,6 +31,7 @@ from .do_not_pass_warning import (
     DO_NOT_PASS, PASS, DoNotPassDecision, EgoState, heading_unit, relative_to_ego,
 )
 from .v2x.cpm import PerceivedObject
+from .vru_warning import GO, STOP, VRUCrossingDecision
 
 Vec3 = Tuple[float, float, float]
 
@@ -390,3 +391,111 @@ class KinematicVehicle:
         self.position = (self.position[0] + fx * self.speed * dt,
                          self.position[1] + fy * self.speed * dt,
                          self.position[2])
+
+
+# --------------------------------------------------------------------------- #
+# The ego at a blind intersection, gated by the VRU Crossing Warning           #
+# --------------------------------------------------------------------------- #
+APPROACH = "APPROACH"
+STOPPED = "STOPPED"
+CROSSING = "CROSSING"
+
+
+@dataclass
+class CrossingParams:
+    cruise_speed_mps: float = 30.0 * KMH
+    stop_distance_m: float = 3.0      # how far short of the conflict point to halt
+    brake_lead_m: float = 20.0        # start shedding speed this far from the stop line
+    creep_speed_mps: float = 4.0 * KMH  # below this, close enough to latch a full stop
+
+
+class IntersectionApproachController(BaseController):
+    """Ego controller whose *only* reason to enter the intersection is the VRU
+    Crossing Warning. Mirrors :class:`DoNotPassController`: no timer or scripted
+    input decides whether the ego crosses, only the decision computed from
+    received messages -- so swapping the honest message stream for the spoofed
+    one is the only thing that can change what happens next.
+
+    ``conflict_point_m`` is the distance, measured along the ego's heading at
+    the moment this controller is built, from the ego's start to the point
+    where the VRUs' path crosses the ego's lane.
+    """
+
+    def __init__(self, lane: LaneReference, conflict_point_m: float,
+                 params: Optional[CrossingParams] = None,
+                 gains: Optional[ControllerGains] = None):
+        super().__init__(lane, gains)
+        self.p = params or CrossingParams()
+        self.conflict_point_m = conflict_point_m
+        self._origin: Optional[Vec3] = None
+        self._origin_fwd: Optional[Tuple[float, float]] = None
+        self.state = APPROACH
+        self.stopped_at: Optional[float] = None
+        self.history: List[Tuple[float, str]] = []
+        # Latched once braking starts inside brake_lead_m for a STOP decision;
+        # a single noisy GO reading (e.g. a VRU's reported velocity jittering
+        # for one tick) must not undo it, or the ego re-accelerates right where
+        # it needs to be slowing down, with no runway left to recover before
+        # committing to CROSSING. Only a full stop or crossing the stop line
+        # clears it.
+        self._braking_committed = False
+
+    def _enter(self, state: str, sim_time: float) -> None:
+        if state != self.state:
+            self.state = state
+            self.history.append((sim_time, state))
+
+    def distance_to_stop_line(self, ego: EgoState) -> float:
+        """Metres still to travel before the stop line (negative once past it)."""
+        if self._origin is None:
+            self._origin = ego.position
+            self._origin_fwd = heading_unit(ego.yaw_deg)
+        dx = ego.position[0] - self._origin[0]
+        dy = ego.position[1] - self._origin[1]
+        travelled = dx * self._origin_fwd[0] + dy * self._origin_fwd[1]
+        return (self.conflict_point_m - self.p.stop_distance_m) - travelled
+
+    def step(self, ego: EgoState, decision: VRUCrossingDecision, dt: float = 0.05,
+             sim_time: float = 0.0) -> VehicleCommand:
+        gap = self.distance_to_stop_line(ego)
+
+        if self.state == CROSSING or gap <= 0.0:
+            # Past the point of no return: committed, no scripted braking
+            # mid-intersection -- a real ADAS can't undo entering the crossing.
+            self._enter(CROSSING, sim_time)
+            target_speed = self.p.cruise_speed_mps
+        elif self.state == STOPPED:
+            if decision.decision == STOP:
+                return VehicleCommand(0.0, self._steer(ego, 0.0), 1.0)
+            # Only a stopped ego, actually re-evaluating whether to depart,
+            # may release the brake on a GO.
+            self._braking_committed = False
+            self._enter(APPROACH, sim_time)
+            target_speed = self.p.cruise_speed_mps
+        elif gap <= self.p.brake_lead_m and (decision.decision == STOP
+                                             or self._braking_committed):
+            self._braking_committed = True
+            if ego.speed <= self.p.creep_speed_mps:
+                # Already at rest in the braking zone: latch the brake fully
+                # rather than routing zero through the proportional speed
+                # controller below, whose coast deadband would otherwise let
+                # the last bit of residual speed idle the car through the
+                # line -- a real ADAS holds the brake, it doesn't drift
+                # forward at walking pace while it waits for the road to clear.
+                self._enter(STOPPED, sim_time)
+                if self.stopped_at is None:
+                    self.stopped_at = sim_time
+                return VehicleCommand(0.0, self._steer(ego, 0.0), 1.0)
+            # In the braking zone: ramp down proportionally to the remaining gap.
+            target_speed = _clamp(gap / max(self.p.brake_lead_m, 1e-3)
+                                  * self.p.cruise_speed_mps,
+                                  0.0, self.p.cruise_speed_mps)
+            self._enter(APPROACH, sim_time)
+        else:
+            # Still well short of the line, or genuinely never told to brake
+            # inside the zone: keep approaching at cruise speed.
+            target_speed = self.p.cruise_speed_mps
+            self._enter(APPROACH, sim_time)
+
+        throttle, brake = self._speed(ego, target_speed)
+        return VehicleCommand(throttle, self._steer(ego, 0.0), brake)

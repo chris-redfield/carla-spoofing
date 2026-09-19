@@ -133,7 +133,46 @@ Full walkthrough with diagrams: [docs/do_not_pass_spoofing.md](docs/do_not_pass_
 
 ---
 
-## 5. Run the multi-vehicle spoofing attack
+## 5. Watch the same attack cause a pedestrian/cyclist collision
+
+```bash
+cd carla-spoofing
+make vru-warning
+```
+
+The **VRU Crossing Warning** scenario: the ego is about to cross an intersection
+while a cyclist and a pedestrian approach from the blind side street. Here the
+drone impersonates the RSU and erases *both* of them from what it reports, so
+the ego's crossing assistant concludes nobody is coming.
+
+It runs **twice**, and the comparison is the point:
+
+| | what you see |
+|---|---|
+| **honest** | the ego brakes to a full stop, waits for the cyclist and pedestrian to cross, then goes |
+| **spoofed** | the ego never gets the warning and drives straight through, hitting the cyclist |
+
+Nothing differs between the two runs but the messages — same as the do-not-pass
+scenario, the ego is driven only by its own controller reacting to the messages
+it receives.
+
+```bash
+make vru-warning RUN=spoofed   # just the crash
+make vru-warning RUN=honest    # just the safe baseline
+make vru-warning-mock          # the same closed loop with no simulator at all
+```
+
+Results land in `out/vru_warning/`:
+
+| File | What it is |
+|---|---|
+| `comparison.json` | the verdict — `attack_caused_collision`, `attack_caused_unsafe_crossing` |
+| `<run>/vru_crossing_decisions.csv` | one row per decision: what the ego concluded, what it *would* have concluded from the honest messages, and the ground truth |
+| `<run>/messages.csv` | who transmitted what, which station id they **claimed**, and what was deleted |
+
+---
+
+## 6. Run the multi-vehicle spoofing attack
 
 ```bash
 cd carla-spoofing
@@ -157,7 +196,7 @@ Open `out/messages.csv` in any spreadsheet to see the attack.
 
 ---
 
-## 6. Stop
+## 7. Stop
 
 ```bash
 make down        # stop the simulator container
@@ -175,6 +214,8 @@ make up        # start sim WITH a window (default)
 make headless  # start sim with NO window (servers)
 make do-not-pass       # drone-as-fake-RSU crash scenario (RUN=honest|spoofed|both)
 make do-not-pass-mock  # the same, with no simulator at all
+make vru-warning       # drone-as-fake-RSU crossing scenario (RUN=honest|spoofed|both)
+make vru-warning-mock  # the same, with no simulator at all
 make spoof     # multi-vehicle attack on the live sim: default 60 s @ 1 Hz/vehicle
                # (ATTACK=fake_object|remove_object|camera, RATE=, DURATION=)
 make test      # unit tests (no sim, no GPU)

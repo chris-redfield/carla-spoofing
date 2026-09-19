@@ -177,3 +177,68 @@ class DecisionWriter:
             self._fh.close()
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# VRU (Vulnerable Road User) Crossing Warning decisions                        #
+# --------------------------------------------------------------------------- #
+CROSSING_DECISION_FIELDS = [
+    "run", "frame", "sim_time", "ego_id", "ego_speed_mps", "ego_state",
+    "acted_decision", "counterfactual_decision", "truth_decision",
+    "flipped", "misled",
+    "blocking_object_id", "hidden_object_id",
+    "ego_time_to_conflict_s", "vru_time_to_lane_s", "n_vru_considered",
+    "n_objects_fused", "acted_reason",
+]
+
+
+class CrossingDecisionWriter:
+    """Writes ``vru_crossing_decisions.csv``: one row per VRU Crossing Warning
+    evaluation. Mirrors :class:`DecisionWriter` for the blind-intersection use
+    case: each row carries the decision the ego *acted on* and the
+    counterfactual decision from the other message stream, so the flip caused
+    by the attack is readable straight off the file.
+    """
+
+    def __init__(self, out_dir: str, filename: str = "vru_crossing_decisions.csv"):
+        self.path = os.path.join(out_dir, filename)
+        self._fh = open(self.path, "w", newline="")
+        self._w = csv.DictWriter(self._fh, fieldnames=CROSSING_DECISION_FIELDS)
+        self._w.writeheader()
+        self.n_rows = 0
+        self.n_flips = 0
+
+    def add(self, run, frame, sim_time, ego_id, ego_speed, ego_state,
+            acted, counterfactual=None, hidden_object_id=None, truth=None) -> None:
+        flipped = counterfactual is not None and counterfactual.decision != acted.decision
+        # `misled` is the ground-truth version of a flip: the ego believes the
+        # crossing is clear while a VRU is really about to be in it.
+        misled = (truth is not None and truth.decision == "STOP"
+                  and acted.decision == "GO")
+        d = acted.to_dict()
+        self._w.writerow({
+            "run": run, "frame": frame, "sim_time": round(sim_time, 3),
+            "ego_id": ego_id, "ego_speed_mps": round(ego_speed, 2),
+            "ego_state": ego_state,
+            "acted_decision": d["decision"],
+            "counterfactual_decision": (counterfactual.decision
+                                        if counterfactual is not None else ""),
+            "truth_decision": truth.decision if truth is not None else "",
+            "flipped": flipped, "misled": misled,
+            "blocking_object_id": d["blocking_object_id"],
+            "hidden_object_id": hidden_object_id if hidden_object_id is not None else "",
+            "ego_time_to_conflict_s": d["ego_time_to_conflict_s"],
+            "vru_time_to_lane_s": d["vru_time_to_lane_s"],
+            "n_vru_considered": d["n_vru_considered"],
+            "n_objects_fused": d["n_objects_considered"],
+            "acted_reason": d["reason"],
+        })
+        self.n_rows += 1
+        if flipped:
+            self.n_flips += 1
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass

@@ -9,7 +9,7 @@ This is the most safety-critical of the three attacks.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -84,3 +84,43 @@ class RemoveObjectAttack(Attack):
         out = carve_box(points, center, dims, yaw)
         self.result.points_removed = int(before - out.shape[0])
         return out
+
+
+class RemoveObjectsAttack(Attack):
+    """Erase several real objects from one CPM in a single pass.
+
+    ``RemoveObjectAttack`` only ever has one victim. Some scenes need more than
+    one erased by the same forged message -- e.g. a blind intersection where a
+    pedestrian AND a cyclist must both vanish for the ego to see a clear
+    crossing. This just runs a ``RemoveObjectAttack`` per target and composes
+    their results.
+    """
+    name = "remove_objects"
+
+    def __init__(self, targets: Sequence[RemoveTarget]):
+        super().__init__()
+        self.targets = list(targets)
+        self._carvers: list = []
+
+    def apply_cpm(self, cpm: CollectivePerceptionMessage
+                  ) -> CollectivePerceptionMessage:
+        out = cpm
+        removed = []
+        self._carvers = []
+        for target in self.targets:
+            sub = RemoveObjectAttack(target)
+            out = sub.apply_cpm(out)
+            if sub.result.removed_object_ids:
+                removed.extend(sub.result.removed_object_ids)
+                self._carvers.append(sub)
+        self.result.removed_object_ids = removed
+        self.result.notes = (f"erased objects {removed}" if removed
+                             else "no matching objects to remove")
+        return out
+
+    def apply_pointcloud(self, points: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        for sub in self._carvers:
+            points = sub.apply_pointcloud(points)
+        if self._carvers:
+            self.result.points_removed = sum(c.result.points_removed for c in self._carvers)
+        return points

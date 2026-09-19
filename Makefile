@@ -11,7 +11,7 @@ RUN ?= both
 DRONE_BACK ?= -2.5
 
 .PHONY: help doctor toolkit setup download extract build up gui headless \
-        spoof do-not-pass do-not-pass-mock test down logs clean
+        spoof do-not-pass do-not-pass-mock vru-warning vru-warning-mock test down logs clean
 
 help:            ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -61,6 +61,19 @@ do-not-pass-mock: ## Same scenario with no simulator at all (kinematic mock)
 	  python -m carla_spoofing.scenarios.do_not_pass_spoofing \
 	  --mode mock --run $(RUN) --drone-back $(DRONE_BACK) \
 	  --out /workspace/out/do_not_pass
+
+vru-warning:     ## VRU Crossing Warning spoofing vs the live sim: make vru-warning [RUN=both]
+                 ## Prepares its own world (loads Town01, clears traffic) — just 'make up' first.
+	$(COMPOSE) run --rm spoofing \
+	  python -m carla_spoofing.scenarios.intersection_vru_spoofing \
+	  --mode carla --host carla-sim --port 2000 --run $(RUN) \
+	  --out /workspace/out/vru_warning
+
+vru-warning-mock: ## Same scenario with no simulator at all (kinematic mock)
+	$(COMPOSE) run --rm --no-deps spoofing \
+	  python -m carla_spoofing.scenarios.intersection_vru_spoofing \
+	  --mode mock --run $(RUN) \
+	  --out /workspace/out/vru_warning
 
 test:            ## Run the unit tests (no sim, no GPU)
 	PYTHONPATH=src python -m pytest tests/ -q
