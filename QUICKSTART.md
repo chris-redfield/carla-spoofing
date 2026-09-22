@@ -133,7 +133,52 @@ Full walkthrough with diagrams: [docs/do_not_pass_spoofing.md](docs/do_not_pass_
 
 ---
 
-## 5. Run the multi-vehicle spoofing attack
+## 5. The same attack at a crossroads (Left Turn Assist)
+
+The second scenario, and the second whitepaper use case. Same attacker — a drone
+impersonating an RSU — against a different safety application. This one needs
+**Town10HD**, so the simulator has to be started on that map:
+
+```bash
+make up MAP=Town10HD     # terminal 1 — note the map
+make left-turn           # terminal 2
+```
+
+If the simulator is already running on another map, `make left-turn` stops and
+tells you so rather than reloading it — that reload is unreliable in this build
+and would restart your sim as a side effect. Do `make down` first.
+
+A car waits at the line to make a **permissive left turn**: it has a green ball,
+so it is allowed to go, and the only question is whether the junction is clear.
+A building on the corner hides the cross street, so it cannot answer that
+question itself and has to trust what the RSU tells it. The drone deletes the
+crossing vehicle from that report.
+
+| | what you see |
+|---|---|
+| **honest** | the car waits at the line until the crossing vehicle has gone through, then turns |
+| **spoofed** | the car turns the moment it reaches the line, into a vehicle it has been told is not there |
+
+Both runs reach the line at the same moment — only the waiting differs, so the
+comparison isolates the messages and nothing else.
+
+```bash
+make left-turn RUN=spoofed   # just the crash
+make left-turn RUN=honest    # just the safe baseline
+make left-turn-mock          # no simulator at all — and no Town10HD needed
+```
+
+Results land in `out/left_turn/`, same shape as above, with
+`<run>/left_turn_decisions.csv` in place of the do-not-pass one.
+
+> **Note:** this scenario is verified end to end in the mock backend; the
+> Town10HD geometry has not yet been checked against the live map.
+
+Full walkthrough with diagrams: [docs/left_turn_spoofing.md](docs/left_turn_spoofing.md).
+
+---
+
+## 6. Run the multi-vehicle spoofing attack
 
 ```bash
 cd carla-spoofing
@@ -157,7 +202,7 @@ Open `out/messages.csv` in any spreadsheet to see the attack.
 
 ---
 
-## 6. Stop
+## 7. Stop
 
 ```bash
 make down        # stop the simulator container
@@ -175,6 +220,8 @@ make up        # start sim WITH a window (default)
 make headless  # start sim with NO window (servers)
 make do-not-pass       # drone-as-fake-RSU crash scenario (RUN=honest|spoofed|both)
 make do-not-pass-mock  # the same, with no simulator at all
+make left-turn         # the same attack at a crossroads — needs 'make up MAP=Town10HD'
+make left-turn-mock    # the same, with no simulator at all
 make spoof     # multi-vehicle attack on the live sim: default 60 s @ 1 Hz/vehicle
                # (ATTACK=fake_object|remove_object|camera, RATE=, DURATION=)
 make test      # unit tests (no sim, no GPU)

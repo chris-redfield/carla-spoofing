@@ -96,8 +96,15 @@ def is_occluded(observer: Vec3, target: Vec3, blocker: Vec3,
 
 def visible_objects(observer: Vec3, objects: Sequence[PerceivedObject],
                     blockers: Sequence[PerceivedObject],
-                    margin_deg: float = 0.0) -> List[PerceivedObject]:
-    """Filter ``objects`` to those not hidden behind any of ``blockers``."""
+                    margin_deg: float = 0.0,
+                    static_occluders: Sequence["StaticOccluder"] = ()
+                    ) -> List[PerceivedObject]:
+    """Filter ``objects`` to those not hidden behind any blocker.
+
+    ``blockers`` are other perceived objects (vehicles); ``static_occluders`` are
+    fixed map geometry, typically the buildings on an intersection corner. Both
+    kinds are checked, since a junction scene usually has both.
+    """
     out = []
     for o in objects:
         hidden = any(
@@ -105,6 +112,100 @@ def visible_objects(observer: Vec3, objects: Sequence[PerceivedObject],
             and is_occluded(observer, o.position, b.position, b.dimensions, margin_deg)
             for b in blockers
         )
+        if not hidden and static_occluders:
+            hidden = any(box.blocks(observer, o.position)
+                         for box in static_occluders)
         if not hidden:
             out.append(o)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Static occlusion: buildings                                                  #
+# --------------------------------------------------------------------------- #
+@dataclass
+class StaticOccluder:
+    """An oriented box of fixed map geometry that blocks line of sight.
+
+    Why a box and not a ray cast: CARLA does offer ``world.cast_ray``, but its
+    result depends on rendering state and it has to be called per (observer,
+    target) pair every tick. Boxes come straight from
+    ``world.get_level_bbs(CityObjectLabel.Buildings)``, are queried once at
+    scene setup, and -- the part that matters for this project -- the identical
+    test runs in the CARLA-free mock backend, where the corner building is just
+    a hand-specified rectangle. One implementation, two backends, and a unit
+    test that does not need a simulator.
+
+    Reasoning is purely planar. A building tall enough to matter blocks the view
+    of a car at any height we care about, and modelling the vertical extent would
+    add a dimension of tuning for no change in outcome.
+    """
+
+    center: Vec3
+    extent: Vec3                    # HALF-sizes (x, y, z), CARLA's convention
+    yaw_deg: float = 0.0
+    label: str = "building"
+
+    def blocks(self, observer: Vec3, target: Vec3) -> bool:
+        """Does the segment observer->target pass through this box?"""
+        return segment_intersects_box(
+            observer, target, self.center, self.extent, self.yaw_deg)
+
+    @classmethod
+    def from_carla_bb(cls, bb, label: str = "building") -> "StaticOccluder":
+        """Build one from a ``carla.BoundingBox`` (as ``get_level_bbs`` returns)."""
+        return cls(center=(bb.location.x, bb.location.y, bb.location.z),
+                   extent=(bb.extent.x, bb.extent.y, bb.extent.z),
+                   yaw_deg=getattr(bb.rotation, "yaw", 0.0), label=label)
+
+
+def segment_intersects_box(p0: Vec3, p1: Vec3, center: Vec3, extent: Vec3,
+                           yaw_deg: float = 0.0) -> bool:
+    """2-D segment vs oriented box, by the slab method in the box's own frame.
+
+    The segment is rotated into the box frame so the test reduces to a plain
+    axis-aligned clip: walk the x and y slabs, intersecting the parameter
+    interval, and the segment hits the box when the interval survives inside
+    [0, 1]. Degenerate (zero-length) segments fall back to a containment test.
+    """
+    c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+
+    def to_local(p: Vec3) -> Tuple[float, float]:
+        dx, dy = p[0] - center[0], p[1] - center[1]
+        return (dx * c + dy * s, -dx * s + dy * c)
+
+    x0, y0 = to_local(p0)
+    x1, y1 = to_local(p1)
+    dx, dy = x1 - x0, y1 - y0
+    ex, ey = abs(extent[0]), abs(extent[1])
+
+    t_enter, t_exit = 0.0, 1.0
+    for start, delta, half in ((x0, dx, ex), (y0, dy, ey)):
+        if abs(delta) < 1e-9:
+            if start < -half or start > half:
+                return False          # parallel to this slab and outside it
+            continue
+        t_a = (-half - start) / delta
+        t_b = (half - start) / delta
+        if t_a > t_b:
+            t_a, t_b = t_b, t_a
+        t_enter = max(t_enter, t_a)
+        t_exit = min(t_exit, t_b)
+        if t_enter > t_exit:
+            return False
+    return True
+
+
+def occluders_near(occluders: Sequence[StaticOccluder], point: Vec3,
+                   radius_m: float) -> List[StaticOccluder]:
+    """Keep only boxes within ``radius_m`` of ``point``.
+
+    A Town10 level returns hundreds of building boxes; a junction scene cares
+    about the handful on its corners. Filtering once at setup keeps the per-tick
+    visibility check cheap and, just as usefully, keeps the run log readable.
+    """
+    out = []
+    for b in occluders:
+        if math.dist((b.center[0], b.center[1]), (point[0], point[1])) <= radius_m:
+            out.append(b)
     return out

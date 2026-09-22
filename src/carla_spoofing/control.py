@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .do_not_pass_warning import (
     DO_NOT_PASS, PASS, DoNotPassDecision, EgoState, heading_unit, relative_to_ego,
 )
+from .left_turn_assist import DO_NOT_TURN, TURN, LeftTurnDecision
 from .v2x.cpm import PerceivedObject
 
 Vec3 = Tuple[float, float, float]
@@ -93,6 +94,162 @@ class StraightLaneReference(LaneReference):
         return (x, y, position[2])
 
 
+@dataclass
+class PolylineReference(LaneReference):
+    """A fixed path given as a list of points -- used for the turn through a junction.
+
+    A junction has no single lane to follow: the ego leaves one lane, crosses
+    open carriageway, and joins another running 90 degrees away. Rather than
+    fight ``get_waypoint``, which snaps to whichever lane is nearest and would
+    hand back the *opposing* lane halfway round the corner, the turn is baked
+    into an explicit path once at setup and simply followed.
+
+    ``point_ahead`` projects the ego onto the polyline, walks forward by the
+    lookahead distance and returns that point, which is exactly what pure
+    pursuit wants. ``progress`` exposes how far along the path the ego is, so
+    the controller can tell "committed" from "still at the line".
+    """
+
+    points: List[Vec3] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._cum = [0.0]
+        for a, b in zip(self.points, self.points[1:]):
+            self._cum.append(self._cum[-1] + math.dist(a[:2], b[:2]))
+
+    @property
+    def length(self) -> float:
+        return self._cum[-1] if self._cum else 0.0
+
+    def _nearest_index(self, position: Vec3) -> int:
+        best, best_d = 0, float("inf")
+        for i, p in enumerate(self.points):
+            d = math.dist(p[:2], position[:2])
+            if d < best_d:
+                best, best_d = i, d
+        return best
+
+    def progress(self, position: Vec3) -> float:
+        """Arc length from the start of the path to the ego's nearest point."""
+        if not self.points:
+            return 0.0
+        return self._cum[self._nearest_index(position)]
+
+    def remaining(self, position: Vec3) -> float:
+        return max(0.0, self.length - self.progress(position))
+
+    def point_ahead(self, position: Vec3, yaw_deg: float, distance: float,
+                    lateral_offset: float = 0.0) -> Vec3:
+        if not self.points:
+            return StraightLaneReference(position, yaw_deg).point_ahead(
+                position, yaw_deg, distance, lateral_offset)
+        target_s = self.progress(position) + distance
+        # Past the end: extrapolate along the final heading so the controller
+        # keeps a sane reference while it drives out of the junction.
+        if target_s >= self.length and len(self.points) >= 2:
+            a, b = self.points[-2], self.points[-1]
+            hx, hy = b[0] - a[0], b[1] - a[1]
+            n = math.hypot(hx, hy) or 1.0
+            over = target_s - self.length
+            return (b[0] + hx / n * over, b[1] + hy / n * over, b[2])
+        i = max(1, next(k for k, s in enumerate(self._cum) if s >= target_s))
+        a, b = self.points[i - 1], self.points[i]
+        seg = self._cum[i] - self._cum[i - 1]
+        f = 0.0 if seg <= 1e-9 else (target_s - self._cum[i - 1]) / seg
+        px = a[0] + (b[0] - a[0]) * f
+        py = a[1] + (b[1] - a[1]) * f
+        pz = a[2] + (b[2] - a[2]) * f
+        if lateral_offset:
+            hx, hy = b[0] - a[0], b[1] - a[1]
+            n = math.hypot(hx, hy) or 1.0
+            px += (-hy / n) * lateral_offset
+            py += (hx / n) * lateral_offset
+        return (px, py, pz)
+
+
+def hermite_turn_path(entry: Vec3, entry_yaw_deg: float,
+                      exit_: Vec3, exit_yaw_deg: float,
+                      samples: int = 24, tangent_scale: float = 0.6) -> List[Vec3]:
+    """Smooth path from one pose to another -- the ego's track through the junction.
+
+    A cubic Hermite spline, not a quarter-circle arc: real junction arms are not
+    reliably at 90 degrees to each other, and the entry and exit lane centres are
+    usually offset rather than meeting at a corner point. Hermite takes both
+    poses and their headings and produces a curve that leaves along the entry
+    heading and arrives along the exit heading whatever the angle between them.
+
+    ``tangent_scale`` sets how far the curve runs straight before it bends --
+    0.6 of the endpoint separation gives a turn that looks driven rather than
+    geometric.
+    """
+    ex, ey = heading_unit(entry_yaw_deg)
+    xx, xy = heading_unit(exit_yaw_deg)
+    span = math.dist(entry[:2], exit_[:2]) * tangent_scale
+    m0 = (ex * span, ey * span)
+    m1 = (xx * span, xy * span)
+    pts: List[Vec3] = []
+    for k in range(samples + 1):
+        t = k / samples
+        t2, t3 = t * t, t * t * t
+        h00 = 2 * t3 - 3 * t2 + 1
+        h10 = t3 - 2 * t2 + t
+        h01 = -2 * t3 + 3 * t2
+        h11 = t3 - t2
+        x = h00 * entry[0] + h10 * m0[0] + h01 * exit_[0] + h11 * m1[0]
+        y = h00 * entry[1] + h10 * m0[1] + h01 * exit_[1] + h11 * m1[1]
+        z = entry[2] + (exit_[2] - entry[2]) * t
+        pts.append((x, y, z))
+    return pts
+
+
+def straightest(waypoints, heading: Tuple[float, float]):
+    """The waypoint whose heading best matches ``heading``.
+
+    CARLA's ``Waypoint.next()`` and ``.previous()`` return a *list* wherever the
+    road graph branches -- every exit of a junction, every lane a road splits
+    into. Indexing ``[0]`` picks whichever one happens to come first, which is
+    arbitrary and silently wrong: it sent a vehicle that was supposed to cross a
+    junction off down the right-hand exit, and walking backwards it put a
+    vehicle's spawn on an entirely different road 64 m from where it belonged.
+
+    Preferring the straightest continuation is the fix in both directions: going
+    forward it means "carry on through the junction", going back it means "stay
+    on this road".
+    """
+    best, best_score = None, -2.0
+    for wp in waypoints:
+        h = heading_unit(wp.transform.rotation.yaw)
+        score = h[0] * heading[0] + h[1] * heading[1]
+        if score > best_score:
+            best, best_score = wp, score
+    return best
+
+
+def walk_back(waypoint, distance_m: float, step_m: float = 2.0):
+    """Walk ``distance_m`` back along the road, staying on the SAME road.
+
+    ``previous(80.0)`` in one hop is not the same thing: it branches at every
+    junction on the way and returns an arbitrary member of the result. Stepping
+    back a couple of metres at a time and taking the straightest branch each
+    time keeps the walk on the approach the caller meant.
+
+    Returns as far back as it got, which may be short of ``distance_m`` if the
+    road runs out -- better a shorter approach than one on the wrong street.
+    """
+    forward = heading_unit(waypoint.transform.rotation.yaw)
+    current, travelled = waypoint, 0.0
+    while travelled < distance_m:
+        hop = min(step_m, distance_m - travelled)
+        candidates = current.previous(hop)
+        if not candidates:
+            break
+        nxt = straightest(candidates, forward)
+        if nxt is None:
+            break
+        current, travelled = nxt, travelled + hop
+    return current, travelled
+
+
 class CarlaLaneReference(LaneReference):
     """Follows the CARLA road graph via waypoints on the ego's current lane.
 
@@ -138,8 +295,13 @@ class CarlaLaneReference(LaneReference):
                         and self._runs_with(neighbour, forward)):
                     wp = neighbour
                     break
+        # At a junction, next() returns EVERY branch -- left, straight, right --
+        # and taking [0] picks an arbitrary one. A car meant to cross the
+        # junction then turns off it, which is exactly what sent the crossing
+        # vehicle away to the right instead of through. Keep going straight:
+        # prefer the branch whose heading best matches where we are pointing.
         nxt = wp.next(max(0.5, distance))
-        target_wp = nxt[0] if nxt else wp
+        target_wp = straightest(nxt, forward) if nxt else wp
         tf = target_wp.transform
         fx, fy = heading_unit(tf.rotation.yaw)
         rx, ry = -fy, fx
@@ -167,6 +329,11 @@ class BaseController:
                  gains: Optional[ControllerGains] = None):
         self.lane = lane
         self.g = gains or ControllerGains()
+        # Last pure-pursuit target and its bearing, kept purely so a trace can
+        # record them. Steering is only ever as good as this point, and without
+        # it in the log a bad turn is indistinguishable from a bad controller.
+        self.last_target: Optional[Vec3] = None
+        self.last_bearing_deg: Optional[float] = None
 
     def _steer(self, ego: EgoState, lateral_offset: float) -> float:
         speed = ego.speed
@@ -174,7 +341,9 @@ class BaseController:
                            self.g.lookahead_min_m, self.g.lookahead_max_m)
         target = self.lane.point_ahead(ego.position, ego.yaw_deg, lookahead,
                                        lateral_offset)
+        self.last_target = target
         s, d = relative_to_ego(ego, target)
+        self.last_bearing_deg = math.degrees(math.atan2(d, max(s, 0.5)))
         # Pure pursuit: steer proportional to the bearing of the target point.
         # d > 0 is to our right, and CARLA's positive steer is right, so the
         # sign carries through unchanged.
@@ -351,6 +520,158 @@ class DoNotPassController(BaseController):
 
         throttle, brake = self._speed(ego, target_speed)
         return VehicleCommand(throttle, self._steer(ego, self.lateral_offset), brake)
+
+
+# --------------------------------------------------------------------------- #
+# The ego: a left-turn state machine gated by the Left Turn Assist decision    #
+# --------------------------------------------------------------------------- #
+APPROACH = "APPROACH"
+WAITING = "WAITING"
+TURNING = "TURNING"
+CLEARED = "CLEARED"
+
+
+@dataclass
+class LeftTurnParams:
+    cruise_speed_mps: float = 30.0 * KMH
+    turn_speed_mps: float = 18.0 * KMH     # you slow down to turn across traffic
+    stop_decel_mps2: float = 2.0           # comfortable approach to the line
+    creep_speed_mps: float = 1.0           # holding speed at the line
+    hold_tolerance_m: float = 2.0          # "at the line" band
+    # Once this far along the turn path the manoeuvre is committed: the ego is
+    # out in the junction, where stopping is more dangerous than continuing.
+    # Its real-world analogue is the point of no return every driver knows, and
+    # it is what makes a late-arriving true warning useless -- the same emergent
+    # detail the do-not-pass run shows when the ego finally sees the car it was
+    # told was not there.
+    commit_distance_m: float = 3.0
+
+
+class LeftTurnController(BaseController):
+    """Ego controller whose *only* reason to turn is the Left Turn Assist decision.
+
+    Same contract as :class:`DoNotPassController`: no timer, no scripted steering,
+    no waypoint schedule. The ego drives up to the line, holds while the warning
+    says DO_NOT_TURN, and commits the moment it says TURN. Feed it honest
+    messages and it waits for a real gap; feed it the forged ones and it turns
+    into the path of a car it has been told is not there.
+
+    This is deliberately *not* how the CarlaNetpp reference scene worked. There
+    the turn was ``apply_control(throttle=1, steer=-0.15)`` on a ``sleep`` timer
+    and happened identically with the attack switched off -- see
+    ``causal-not-choreographed`` in the project notes.
+    """
+
+    # A junction turn is a much tighter path than a lane change, and the default
+    # gains are tuned for the latter. Looking 18 m ahead on a ~20 m arc puts the
+    # target point almost at the exit, so pure pursuit aims straight across the
+    # junction and cuts the corner instead of following the curve. These gains
+    # keep the target on the arc.
+    TURN_GAINS = ControllerGains(lookahead_gain=1.0, lookahead_min_m=4.0,
+                                 lookahead_max_m=9.0, steer_gain=1.3)
+
+    def __init__(self, approach: LaneReference, turn_path: PolylineReference,
+                 hold_point: Vec3,
+                 params: Optional[LeftTurnParams] = None,
+                 gains: Optional[ControllerGains] = None,
+                 turn_path_factory=None,
+                 exit_lane: Optional[LaneReference] = None):
+        super().__init__(approach, gains or LeftTurnController.TURN_GAINS)
+        self.approach_lane = approach
+        self.turn_path = turn_path
+        # Built from the ego's ACTUAL pose at the moment it commits, when given.
+        # A path precomputed from the stop line does not start where the ego
+        # ends up -- it halts within a tolerance band, a metre or two short and
+        # a few centimetres off the centreline -- so the first pure-pursuit
+        # target sits off to one side and the controller answers with full lock.
+        # That instantaneous slam to the stop is what a heavy vehicle turns into
+        # a visible lurch. Re-deriving the arc from the real pose makes the
+        # first target lie straight ahead, and the turn begins smoothly.
+        self.turn_path_factory = turn_path_factory
+        # Where to steer once through the junction. The turn path ends; the road
+        # does not, and extrapolating off the end of a polyline is not driving.
+        self.exit_lane = exit_lane
+        self.hold_point = hold_point
+        self.p = params or LeftTurnParams()
+        self.state = APPROACH
+        self.turn_started_at: Optional[float] = None
+        self.committed = False
+        self.history: List[Tuple[float, str]] = []
+
+    def _enter(self, state: str, sim_time: float) -> None:
+        if state != self.state:
+            self.state = state
+            self.history.append((sim_time, state))
+
+    def _distance_to_hold(self, ego: EgoState) -> float:
+        """Signed distance to the stop line, positive while still short of it."""
+        s, _ = relative_to_ego(ego, self.hold_point)
+        return s
+
+    def _approach_speed(self, ego: EgoState, stopping: bool) -> float:
+        """Cruise, but bleed off smoothly so we arrive at the line at a crawl."""
+        if not stopping:
+            return self.p.cruise_speed_mps
+        d = max(0.0, self._distance_to_hold(ego) - self.p.hold_tolerance_m)
+        # v = sqrt(2 a d): the fastest speed from which we can still stop in d.
+        allowed = math.sqrt(2.0 * self.p.stop_decel_mps2 * d)
+        return _clamp(min(self.p.cruise_speed_mps, allowed),
+                      0.0, self.p.cruise_speed_mps)
+
+    def step(self, ego: EgoState, decision: LeftTurnDecision,
+             objects: Sequence[PerceivedObject], dt: float = 0.05,
+             sim_time: float = 0.0) -> VehicleCommand:
+        clear = decision.decision == TURN and decision.turn_intent
+
+        if self.state in (APPROACH, WAITING):
+            at_line = self._distance_to_hold(ego) <= self.p.hold_tolerance_m
+            if at_line and self.state == APPROACH:
+                self._enter(WAITING, sim_time)
+            # The turn can only be commenced from the line, never from halfway
+            # down the approach. Partly realism -- you yield at the junction
+            # mouth, not 20 m short of it -- but mainly so both runs commit from
+            # the *same place*. An ego that set off from wherever it happened to
+            # be when the first clear message arrived would differ between runs
+            # in its geometry as well as its beliefs, and the comparison would
+            # no longer isolate the message stream.
+            if clear and self.state == WAITING:
+                if self.turn_path_factory is not None:
+                    self.turn_path = self.turn_path_factory(ego)
+                self._enter(TURNING, sim_time)
+                self.turn_started_at = sim_time
+                self.lane = self.turn_path
+                target = self.p.turn_speed_mps
+            else:
+                # Hold at the line. Creep rather than fully stop while still
+                # approaching, so the ego is moving when a gap appears.
+                target = (0.0 if self.state == WAITING
+                          else self._approach_speed(ego, stopping=True))
+                self.lane = self.approach_lane
+
+        elif self.state == TURNING:
+            target = self.p.turn_speed_mps
+            travelled = self.turn_path.progress(ego.position)
+            if travelled >= self.p.commit_distance_m:
+                self.committed = True
+            # A warning that arrives before we are committed still aborts.
+            if decision.decision == DO_NOT_TURN and not self.committed:
+                self._enter(WAITING, sim_time)
+                self.turn_started_at = None
+                self.lane = self.approach_lane
+                target = 0.0
+            elif self.turn_path.remaining(ego.position) <= 0.5:
+                self._enter(CLEARED, sim_time)
+
+        else:  # CLEARED -- through the junction, drive out along the exit road
+            target = self.p.cruise_speed_mps
+            self.lane = self.exit_lane if self.exit_lane is not None else self.turn_path
+
+        throttle, brake = self._speed(ego, target)
+        # A commanded zero really means stop, not coast: without this the ego
+        # rolls through the line on residual speed while "waiting".
+        if target <= 1e-6 and ego.speed > 0.1:
+            throttle, brake = 0.0, 1.0
+        return VehicleCommand(throttle, self._steer(ego, 0.0), brake)
 
 
 # --------------------------------------------------------------------------- #

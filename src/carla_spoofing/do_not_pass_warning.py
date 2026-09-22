@@ -39,40 +39,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .geometry import (          # re-exported: this module's public surface
+    VEHICLE_CLASSES, EgoState, Vec3, along as _along, ego_frame, heading_unit,
+    relative_to_ego,
+)
 from .v2x.cpm import PerceivedObject
-
-Vec3 = Tuple[float, float, float]
 
 PASS = "PASS"
 DO_NOT_PASS = "DO_NOT_PASS"
-
-# Classes that count as a vehicle for lead / oncoming reasoning. Pedestrians are
-# a hazard for other warnings, not for "may I use the opposing lane".
-VEHICLE_CLASSES = frozenset({"car", "truck", "bus", "bicycle", "motorcycle"})
-
-
-@dataclass
-class EgoState:
-    """The receiver's own pose -- what the DNPW application knows about itself."""
-
-    station_id: int
-    position: Vec3
-    yaw_deg: float = 0.0
-    velocity: Vec3 = (0.0, 0.0, 0.0)
-    # Speed the ego *wants* to travel at. Pass intent is judged against this,
-    # not against the current speed: a car already queued behind a slow lead is
-    # travelling at the lead's speed, and comparing the two would conclude it has
-    # no reason to overtake -- exactly backwards. None falls back to the current
-    # speed, which is right for a one-off evaluation with no controller attached.
-    desired_speed_mps: Optional[float] = None
-
-    @property
-    def speed(self) -> float:
-        return math.sqrt(sum(c * c for c in self.velocity))
-
-    @property
-    def reference_speed(self) -> float:
-        return self.speed if self.desired_speed_mps is None else self.desired_speed_mps
 
 
 @dataclass
@@ -130,34 +104,6 @@ class DoNotPassDecision:
             "n_oncoming": self.n_oncoming,
             "n_objects_considered": self.n_objects_considered,
         }
-
-
-# --------------------------------------------------------------------------- #
-# Geometry helpers (CARLA frame: X forward, Y right, yaw about Z, degrees)     #
-# --------------------------------------------------------------------------- #
-def heading_unit(yaw_deg: float) -> Tuple[float, float]:
-    """Planar forward unit vector for a yaw, matching CARLA's forward vector."""
-    r = math.radians(yaw_deg)
-    return (math.cos(r), math.sin(r))
-
-
-def ego_frame(yaw_deg: float) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    """(forward, right) unit vectors. Y is right-handed *in CARLA's left-handed
-    world*, so 'right' is the forward vector rotated +90 deg about Z."""
-    fx, fy = heading_unit(yaw_deg)
-    return (fx, fy), (-fy, fx)
-
-
-def relative_to_ego(ego: EgoState, position: Vec3) -> Tuple[float, float]:
-    """(longitudinal, lateral) offset of ``position`` in the ego's frame."""
-    fwd, right = ego_frame(ego.yaw_deg)
-    dx = position[0] - ego.position[0]
-    dy = position[1] - ego.position[1]
-    return dx * fwd[0] + dy * fwd[1], dx * right[0] + dy * right[1]
-
-
-def _along(vec: Vec3, unit: Tuple[float, float]) -> float:
-    return vec[0] * unit[0] + vec[1] * unit[1]
 
 
 # --------------------------------------------------------------------------- #
