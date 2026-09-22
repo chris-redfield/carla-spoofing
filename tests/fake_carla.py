@@ -177,3 +177,82 @@ def make_module():
                  "CityObjectLabel", "TrafficLightState", "VehicleControl"):
         setattr(m, name, globals()[name])
     return m
+
+
+# --------------------------------------------------------------------------- #
+# A straight two-way road, for the do-not-pass scenario                        #
+# --------------------------------------------------------------------------- #
+class LaneWaypoint:
+    """A point on a straight two-way road running along +X.
+
+    ``lane_id`` +1 travels +X, -1 travels -X, offset sideways in Y. Enough to
+    exercise ``CarlaLaneReference``, whose whole job is refusing to follow the
+    opposing lane when an overtake puts the car across the centre line.
+    """
+
+    LANE_WIDTH = 3.5
+
+    def __init__(self, world, s, lane_id=1, branch=False):
+        self.world = world
+        self.s = s
+        self.lane_id = lane_id
+        self.road_id = 1
+        self.lane_type = LaneType.Driving
+        self.is_junction = False
+        self._branch = branch
+
+    @property
+    def transform(self):
+        yaw = 0.0 if self.lane_id > 0 else 180.0
+        y = -self.LANE_WIDTH / 2 if self.lane_id > 0 else self.LANE_WIDTH / 2
+        return Transform(Location(self.s, y, 0.0), Rotation(yaw=yaw))
+
+    def _step(self, d, sign):
+        ahead = LaneWaypoint(self.world, self.s + sign * d * (1 if self.lane_id > 0 else -1),
+                             self.lane_id)
+        if not self.world.branching:
+            return [ahead]
+        # A side road listed FIRST, as CARLA may well do.
+        return [_BranchWaypoint(self.world, self.s, self.lane_id), ahead]
+
+    def next(self, d):
+        return self._step(d, +1)
+
+    def previous(self, d):
+        return self._step(d, -1)
+
+    def get_left_lane(self):
+        return LaneWaypoint(self.world, self.s, -self.lane_id)
+
+    def get_right_lane(self):
+        return None
+
+
+class _BranchWaypoint(LaneWaypoint):
+    @property
+    def transform(self):
+        return Transform(Location(self.s, 0.0, 0.0), Rotation(yaw=90.0))
+
+
+class StraightRoadMap:
+    def __init__(self, world):
+        self.world = world
+        self.name = "Carla/Maps/Town01"
+
+    def get_waypoint(self, location, project_to_road=True, lane_type=None):
+        # Snap to whichever lane is nearer in Y -- exactly the behaviour that
+        # makes an overtaking car resolve to the opposing lane mid-manoeuvre.
+        lane_id = 1 if location.y < 0 else -1
+        return LaneWaypoint(self.world, location.x, lane_id)
+
+
+class StraightRoadWorld:
+    def __init__(self, branching=False):
+        self.branching = branching
+        self._map = StraightRoadMap(self)
+
+    def get_map(self):
+        return self._map
+
+    def get_actors(self):
+        return []
