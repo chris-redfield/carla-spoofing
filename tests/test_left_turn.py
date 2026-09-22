@@ -259,28 +259,29 @@ def test_a_run_that_proves_nothing_says_so(tmp_path):
     assert rc != 0, "a hollow run must not exit 0"
 
 
-def test_both_runs_commit_from_the_same_place(tmp_path):
-    """The runs must differ in beliefs, not in geometry.
+def test_honest_waits_at_the_line_and_the_attacked_ego_does_not(tmp_path):
+    """The behavioural signature of the attack, as it should look.
 
-    Both egos reach the stop line at the same moment; only how long they wait
-    there differs. If the spoofed ego set off from further back the comparison
-    would confound position with belief.
+    An ego that can see the junction is clear flows through without halting;
+    one that cannot stops and waits for a gap. Requiring a full stop before the
+    turn was an earlier simplification -- it made both runs pause identically
+    and hid the difference. What must stay true is that both make the decision
+    over the same stretch of road, so the comparison is still about beliefs and
+    not about geometry.
     """
     from carla_spoofing.scenarios.left_turn_spoofing import main
     assert main(["--mode", "mock", "--run", "both", "--sink", "null",
                  "--out", str(tmp_path)]) == 0
     c = json.loads((tmp_path / "comparison.json").read_text())
+    honest, spoofed = c["runs"]["honest"], c["runs"]["spoofed"]
 
-    def waiting_at(run):
-        return next(t for t, s in c["runs"][run]["ego_state_changes"] if s == "WAITING")
+    def states(run):
+        return [s for _t, s in run["ego_state_changes"]]
 
-    assert waiting_at("honest") == pytest.approx(waiting_at("spoofed"))
-    # ... and the attack makes it go sooner.
-    assert c["runs"]["spoofed"]["turn_started_s"] < c["runs"]["honest"]["turn_started_s"]
-    # The spoofed ego commits the moment it reaches the line; the honest one
-    # waits there for a real gap.
-    assert c["runs"]["spoofed"]["turn_started_s"] == pytest.approx(
-        waiting_at("spoofed"))
+    assert "WAITING" in states(honest), "the honest ego should yield at the line"
+    assert "WAITING" not in states(spoofed), (
+        "the deceived ego should flow straight through, not stop first")
+    assert spoofed["turn_started_s"] < honest["turn_started_s"]
 
 
 def test_attack_actually_removed_something(tmp_path):

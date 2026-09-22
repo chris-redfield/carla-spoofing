@@ -581,6 +581,17 @@ class LeftTurnParams:
     # detail the do-not-pass run shows when the ego finally sees the car it was
     # told was not there.
     commit_distance_m: float = 3.0
+    # How close to the line the ego may be when it commits. It does NOT have to
+    # have stopped: if the junction reads as clear on the approach, a real
+    # driver flows through without ever halting, and requiring a full stop hid
+    # that difference. Under attack the ego now simply never stops -- a sharper
+    # demonstration than stopping and then going.
+    #
+    # Measured in the mock: 2.5-9 m all give the wanted split (honest stops and
+    # waits, spoofed flows through). At 14 m it breaks -- from that far out the
+    # junction still reads clear in BOTH runs, so the honest ego commits too and
+    # then has to abort. 8 m sits in the middle of the working range.
+    commit_within_m: float = 8.0
 
 
 class LeftTurnController(BaseController):
@@ -663,14 +674,15 @@ class LeftTurnController(BaseController):
             at_line = self._distance_to_hold(ego) <= self.p.hold_tolerance_m
             if at_line and self.state == APPROACH:
                 self._enter(WAITING, sim_time)
-            # The turn can only be commenced from the line, never from halfway
-            # down the approach. Partly realism -- you yield at the junction
-            # mouth, not 20 m short of it -- but mainly so both runs commit from
-            # the *same place*. An ego that set off from wherever it happened to
-            # be when the first clear message arrived would differ between runs
-            # in its geometry as well as its beliefs, and the comparison would
-            # no longer isolate the message stream.
-            if clear and self.state == WAITING:
+            # The turn may be commenced from anywhere inside `commit_within_m`
+            # of the line -- not only from a standstill at it. A driver who can
+            # see the junction is clear flows through; one who cannot stops and
+            # waits. Both runs still make the decision over the same stretch of
+            # road, so the comparison remains about beliefs rather than
+            # geometry, but the honest and attacked behaviours now differ in
+            # the way they should: waiting versus not even slowing.
+            near_line = self._distance_to_hold(ego) <= self.p.commit_within_m
+            if clear and (self.state == WAITING or near_line):
                 if self.turn_path_factory is not None:
                     self.turn_path = self.turn_path_factory(ego)
                 self._enter(TURNING, sim_time)

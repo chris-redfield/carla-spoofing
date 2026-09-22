@@ -159,12 +159,19 @@ class ScenarioConfig:
     # stopped at the line does not pivot from there -- it pulls forward and
     # turns from inside. Starting the arc at the line made the ego cut the
     # corner and clip a traffic-light pole on the island between the two roads.
-    turn_entry_advance_m: float = 5.0
+    # Measured against the pole the ego kept clipping, at (-37.4, 17.4) on the
+    # live map: advance 5 / tangent 0.35 left 2.11 m of clearance -- about the
+    # cybertruck's own width, hence the hits and near misses. 8 / 0.60 gives
+    # 4.22 m, with the lane discipline on the approach unchanged (0.02 m) and
+    # the exit heading slightly better. Both dials widen the turn monotonically;
+    # these are as wide as they can go before the ego overshoots into the far
+    # side of the junction.
+    turn_entry_advance_m: float = 8.0
     exit_run_out_m: float = 6.0       # how far the turn path runs past the exit
     # Tangent length as a fraction of the turn's endpoint separation. Small,
     # because a junction turn is a tight arc: at 0.6 over a 46 m span the curve
     # bent 27 deg within 4 m and the controller answered with full lock.
-    turn_tangent_scale: float = 0.35
+    turn_tangent_scale: float = 0.60
 
     clean_vehicles: bool = True
     freeze_lights_green: bool = True
