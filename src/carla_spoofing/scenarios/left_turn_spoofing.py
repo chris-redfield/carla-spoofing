@@ -1451,7 +1451,15 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
     except Exception:                              # noqa: BLE001
         pass
 
-    existing = [a for a in world.get_actors().filter("vehicle.*")]
+    actors = world.get_actors()
+    n_walkers = len(actors.filter("walker.*"))
+    existing = [a for a in actors.filter("vehicle.*")]
+    print(f"[lta] world census before setup: {len(existing)} vehicle(s), "
+          f"{n_walkers} walker(s)")
+    if n_walkers:
+        print(f"[lta] note: the {n_walkers} pedestrian(s) are NOT removed -- "
+              f"they are not vehicles and do not affect the decision. Start the "
+              f"sim with SPAWN_TRAFFIC=0 to have neither.")
     if existing:
         if cfg.clean_vehicles:
             print(f"[lta] removing {len(existing)} pre-existing vehicles ...")
@@ -1697,6 +1705,18 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
               f"{time.monotonic() - _loop_t0:.1f}s of wall clock")
         if args.linger > 0:
             print(f"[lta] holding the scene for {args.linger:.0f}s ...")
+            # Bring everything to a stop FIRST. A CARLA vehicle keeps whatever
+            # control was last applied to it, and the linger loop only ticks the
+            # world -- so at the end of a run that finished normally the ego was
+            # still holding cruise throttle and a stale steering angle, and it
+            # drove on uncontrolled for the whole hold and crashed. "Hold the
+            # scene" has to mean hold it still.
+            for a in spawned:
+                try:
+                    a.apply_control(carla.VehicleControl(throttle=0.0,
+                                                         steer=0.0, brake=1.0))
+                except Exception:                  # noqa: BLE001
+                    pass
             hold_until = time.monotonic() + args.linger
             while time.monotonic() < hold_until:
                 world.tick()

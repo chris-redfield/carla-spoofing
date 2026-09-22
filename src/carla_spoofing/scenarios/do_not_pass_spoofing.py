@@ -1025,6 +1025,19 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         if args.linger > 0:
             print(f"[dnp] holding the finished scene for {args.linger:.0f}s "
                   f"before clearing the vehicles (--linger 0 to skip) ...")
+            # Stop them first. A CARLA vehicle keeps its last applied control,
+            # and this loop only ticks -- so a run that ended normally, rather
+            # than in a collision, left the ego holding cruise throttle and a
+            # stale steering angle and it drove on uncontrolled for the whole
+            # hold. Only ever noticed in the left-turn scenario, because there
+            # the honest run finishes its manoeuvre and keeps going; here the
+            # spoofed run ends wrecked and barely moves. Same bug either way.
+            for a in spawned:
+                try:
+                    a.apply_control(carla.VehicleControl(throttle=0.0,
+                                                         steer=0.0, brake=1.0))
+                except Exception:                  # noqa: BLE001
+                    pass
             hold_until = time.monotonic() + args.linger
             while time.monotonic() < hold_until:
                 try:
