@@ -57,8 +57,8 @@ from ..attacks.remove_object import RemoveObjectAttack, RemoveTarget
 from ..control import (
     TURNING, WAITING, CarlaLaneReference, ConstantSpeedController,
     KinematicVehicle, KMH, LeftTurnController, LeftTurnParams,
-    PolylineReference, StraightLaneReference, hermite_turn_path, straightest,
-    walk_back,
+    PolylineReference, StraightLaneReference, approach_then_turn,
+    hermite_turn_path, straightest, walk_back,
 )
 from ..drone import place_at as place_drone_at
 from ..fusion import (
@@ -155,6 +155,11 @@ class ScenarioConfig:
     hazard_max_speed_kmh: float = 55.0
     crossing_speed_kmh: float = 35.0
     stop_line_m: float = 6.0          # stop line, back from the junction centre
+    # How far INTO the junction the ego drives before it starts turning. A car
+    # stopped at the line does not pivot from there -- it pulls forward and
+    # turns from inside. Starting the arc at the line made the ego cut the
+    # corner and clip a traffic-light pole on the island between the two roads.
+    turn_entry_advance_m: float = 5.0
     exit_run_out_m: float = 6.0       # how far the turn path runs past the exit
     # Tangent length as a fraction of the turn's endpoint separation. Small,
     # because a junction turn is a tight arc: at 0.6 over a 46 m span the curve
@@ -360,7 +365,8 @@ class Outcome:
     turn_committed_s: Optional[float] = None
     turn_was_unsafe: bool = False           # ground truth said DO_NOT_TURN
     truth_at_turn: str = ""
-    collision: Optional[dict] = None
+    collision: Optional[dict] = None           # vehicle vs vehicle only
+    static_collision: Optional[dict] = None    # scenery: a driving fault
     n_decisions: int = 0
     n_flips: int = 0
     first_flip_s: Optional[float] = None
@@ -385,6 +391,8 @@ class Outcome:
             "truth_at_turn": self.truth_at_turn,
             "collision": self.collision,
             "collided": self.collision is not None,
+            "static_collision": self.static_collision,
+            "hit_scenery": self.static_collision is not None,
             "n_decisions": self.n_decisions, "n_flips": self.n_flips,
             "first_flip_s": self.first_flip_s,
             "ego_state_changes": self.ego_state_changes,
@@ -1144,6 +1152,13 @@ def _derive_transforms(carla, world, cfg, args=None):
                       crossing_wp.transform.location.y,
                       crossing_wp.transform.location.z)
 
+    # The point inside the junction the ego turns from: the junction boundary,
+    # advanced along the approach heading so the car is properly in the box.
+    _jfx, _jfy = heading_unit(junction_yaw)
+    turn_entry = (junction_wp.transform.location.x + _jfx * cfg.turn_entry_advance_m,
+                  junction_wp.transform.location.y + _jfy * cfg.turn_entry_advance_m,
+                  junction_wp.transform.location.z)
+
     # Run the path a little PAST the junction's exit waypoint. That waypoint sits
     # on the junction boundary, so a path ending there leaves the ego steering at
     # a point it is already on the moment it arrives -- and it drifts. Extending
@@ -1151,13 +1166,14 @@ def _derive_transforms(carla, world, cfg, args=None):
     # straightens up and drives out.
     exit_beyond = exit_wp.next(cfg.exit_run_out_m)
     exit_end = exit_beyond[0] if exit_beyond else exit_wp
-    turn_points = hermite_turn_path(
+    turn_points = approach_then_turn(
         (stop_wp.transform.location.x, stop_wp.transform.location.y,
          stop_wp.transform.location.z),
-        stop_wp.transform.rotation.yaw,
+        turn_entry, junction_yaw,
         (exit_end.transform.location.x, exit_end.transform.location.y,
          exit_end.transform.location.z),
-        exit_end.transform.rotation.yaw)
+        exit_end.transform.rotation.yaw,
+        tangent_scale=cfg.turn_tangent_scale)
 
     return {
         "ego_tf": lift(ego_wp.transform),
@@ -1170,6 +1186,7 @@ def _derive_transforms(carla, world, cfg, args=None):
                             junction_wp.transform.location.y,
                             junction_wp.transform.location.z),
         "ego_yaw_deg": junction_yaw,
+        "turn_entry_point": turn_entry,
         "exit_yaw_deg": exit_end.transform.rotation.yaw,
         "exit_point": (exit_end.transform.location.x,
                        exit_end.transform.location.y,
@@ -1386,15 +1403,14 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
     scene = _derive_transforms(carla, world, cfg, args)
     print(f"[lta] placement: {scene['note']}")
     outcome.notes.append(f"placement: {scene['note']}")
-    for who, got, want in (("ego", scene["ego_walked_m"], cfg.ego_back_m),
-                           ("hazard", scene["crossing_walked_m"],
-                            cfg.hazard_start_distance())):
-        if got < want - 5.0:
-            note = (f"WARNING: the {who} could only be placed {got:.0f} m back, "
-                    f"not the {want:.0f} m asked for -- the road runs out or "
-                    f"branches before then. The approach is shorter than "
-                    f"intended and the timing between the two vehicles will be "
-                    f"off; lower --{'ego-back' if who == 'ego' else 'crossing-back'}.")
+    # Approach lengths are whatever the chosen spawn points give; the hazard's
+    # speed is solved to match. Only a genuinely tiny run-up is worth flagging.
+    for who, got in (("ego", scene["ego_walked_m"]),
+                     ("hazard", scene["crossing_walked_m"])):
+        if got < 15.0:
+            note = (f"WARNING: the {who} has only {got:.0f} m of approach -- it "
+                    f"starts almost on top of the junction. Run "
+                    f"`make left-turn-survey` for spawns with a longer run-up.")
             print("[lta] " + note)
             outcome.notes.append(note)
 
@@ -1466,6 +1482,12 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
         collision_sensor.listen(lambda e: collisions.append({
             "with_actor_id": e.other_actor.id,
             "with_type_id": e.other_actor.type_id,
+            # Only a vehicle-vs-vehicle impact is the outcome this scenario
+            # measures. Clipping a pole or a wall is the ego driving badly --
+            # it must be reported loudly, but it must NOT be scored as the
+            # collision the attack caused. The honest run hit a traffic light
+            # on the corner, which would otherwise have read as a crash.
+            "is_vehicle": e.other_actor.type_id.startswith("vehicle."),
         }))
 
         spectator = world.get_spectator()
@@ -1484,10 +1506,11 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
         turn_path = PolylineReference(points=scene["turn_points"])
 
         def _turn_from(ego_state):
-            """Re-derive the arc from where the ego actually stopped."""
-            return PolylineReference(points=hermite_turn_path(
-                ego_state.position, ego_state.yaw_deg,
-                scene["exit_point"], scene["exit_yaw_deg"],
+            """Straight into the junction from wherever it stopped, then the arc."""
+            return PolylineReference(points=approach_then_turn(
+                ego_state.position, scene["turn_entry_point"],
+                scene["ego_yaw_deg"], scene["exit_point"],
+                scene["exit_yaw_deg"],
                 tangent_scale=cfg.turn_tangent_scale))
 
         ego_ctrl = LeftTurnController(
@@ -1573,8 +1596,17 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
             if ego_ctrl.committed and outcome.turn_committed_s is None:
                 outcome.turn_committed_s = round(sim_time, 2)
 
-            if collisions and outcome.collision is None:
-                outcome.collision = dict(collisions[0])
+            hits = [c for c in collisions if c["is_vehicle"]]
+            scenery = [c for c in collisions if not c["is_vehicle"]]
+            if scenery and outcome.static_collision is None:
+                outcome.static_collision = dict(scenery[0])
+                outcome.static_collision["sim_time"] = round(sim_time, 2)
+                print(f"[lta] the ego hit scenery "
+                      f"({outcome.static_collision['with_type_id']}) at "
+                      f"{sim_time:.2f}s -- that is a driving fault, not the "
+                      f"attack")
+            if hits and outcome.collision is None:
+                outcome.collision = dict(hits[0])
                 outcome.collision["sim_time"] = round(sim_time, 2)
                 outcome.collision["ego_speed_mps"] = round(ego_state.speed, 2)
                 print(f"[lta] COLLISION at {sim_time:.2f}s with "
@@ -1699,6 +1731,13 @@ def _evidence_problems(results: Dict[str, dict]) -> List[str]:
     s = results.get(SPOOFED, {})
     h = results.get(HONEST, {})
 
+    for name, r in (("spoofed", s), ("honest", h)):
+        if r and r.get("hit_scenery"):
+            hit = r["static_collision"]
+            problems.append(
+                f"the {name} ego hit scenery ({hit['with_type_id']}) at "
+                f"{hit['sim_time']}s -- it is not driving the junction "
+                f"correctly, so nothing about this run is trustworthy")
     for name, r in (("spoofed", s), ("honest", h)):
         if r and not r.get("turn_attempted"):
             problems.append(

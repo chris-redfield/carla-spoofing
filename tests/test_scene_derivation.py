@@ -77,3 +77,56 @@ def test_hazard_speed_is_solved_into_a_plausible_range():
     cfg = ScenarioConfig()
     assert cfg.hazard_min_speed_kmh <= scene["hazard_speed_kmh"] \
         <= cfg.hazard_max_speed_kmh
+
+
+def test_the_turn_stays_in_lane_until_it_reaches_the_junction():
+    """The regression: the ego clipped a pole on the corner island.
+
+    It began arcing 10 m short of the junction and cut diagonally across the
+    corner. A car stopped at the line pulls forward into the junction first and
+    turns from inside it, so the path must show no sideways drift at all while
+    it is still on the approach.
+    """
+    from carla_spoofing.control import approach_then_turn
+    from carla_spoofing.geometry import heading_unit
+    import math
+
+    # Real numbers from the live run that hit the traffic light.
+    ego = (-48.838, -11.136, 0.0)
+    junction = (-48.8, -1.2, 0.0)
+    approach_yaw = 90.0
+    entry = (junction[0], junction[1] + 5.0, 0.0)
+    exit_ = (-28.7, 28.1, 0.0)
+
+    pts = approach_then_turn(ego, entry, approach_yaw, exit_, 0.2,
+                             tangent_scale=0.35)
+    fwd = heading_unit(approach_yaw)
+    right = (-fwd[1], fwd[0])
+    before = [p for p in pts if p[1] < junction[1]]
+    assert before, "path should include the run up to the junction"
+    drift = max(abs((p[0] - ego[0]) * right[0] + (p[1] - ego[1]) * right[1])
+                for p in before)
+    assert drift < 0.5, f"drifted {drift:.1f} m sideways before the junction"
+
+
+def test_scene_turn_path_starts_with_a_straight_run():
+    """Built into the scene, not just available as a helper."""
+    import types
+    import fake_carla
+    from carla_spoofing.scenarios.left_turn_spoofing import (
+        ScenarioConfig, _derive_transforms)
+    from carla_spoofing.geometry import heading_unit
+
+    scene = _derive_transforms(
+        fake_carla.make_module(), fake_carla.World(), ScenarioConfig(),
+        types.SimpleNamespace(ego_spawn=None, hazard_spawn=None))
+    pts = scene["turn_points"]
+    fwd = heading_unit(scene["ego_yaw_deg"])
+    right = (-fwd[1], fwd[0])
+    start = pts[0]
+    # The first few metres must be dead straight along the approach.
+    early = [p for p in pts
+             if (p[0] - start[0]) * fwd[0] + (p[1] - start[1]) * fwd[1] < 4.0]
+    drift = max(abs((p[0] - start[0]) * right[0] + (p[1] - start[1]) * right[1])
+                for p in early)
+    assert drift < 0.3, f"turn begins bending immediately ({drift:.2f} m)"

@@ -167,6 +167,42 @@ class PolylineReference(LaneReference):
         return (px, py, pz)
 
 
+def straight_points(start: Vec3, end: Vec3, step_m: float = 1.5) -> List[Vec3]:
+    """Sample a straight line between two points, ``start`` excluded of nothing."""
+    d = math.dist(start[:2], end[:2])
+    n = max(1, int(round(d / step_m)))
+    out = []
+    for k in range(n + 1):
+        t = k / n
+        out.append((start[0] + (end[0] - start[0]) * t,
+                    start[1] + (end[1] - start[1]) * t,
+                    start[2] + (end[2] - start[2]) * t))
+    return out
+
+
+def approach_then_turn(ego_position: Vec3, entry: Vec3, entry_yaw_deg: float,
+                       exit_: Vec3, exit_yaw_deg: float,
+                       tangent_scale: float = 0.5) -> List[Vec3]:
+    """Drive straight into the junction, THEN turn: the path a driver actually takes.
+
+    An arc that starts where the car is standing begins bending while it is
+    still short of the junction, and the car describes a long diagonal across
+    the corner -- which is how the ego came to clip a traffic-light pole on the
+    island between the two roads. A car stopped at the line does not turn from
+    there; it pulls forward into the junction and turns from inside it.
+
+    So the path is a straight run from the ego's pose up to ``entry`` (a point
+    inside the junction, on the approach heading), and only then the arc round
+    to the exit. The straight part also gives pure pursuit a sane target during
+    the first moments of the manoeuvre, when a curve starting under the front
+    axle gives it nothing useful to aim at.
+    """
+    lead_in = straight_points(ego_position, entry)
+    arc = hermite_turn_path(entry, entry_yaw_deg, exit_, exit_yaw_deg,
+                            tangent_scale=tangent_scale)
+    return lead_in[:-1] + arc          # drop the duplicated join point
+
+
 def hermite_turn_path(entry: Vec3, entry_yaw_deg: float,
                       exit_: Vec3, exit_yaw_deg: float,
                       samples: int = 24, tangent_scale: float = 0.6) -> List[Vec3]:
