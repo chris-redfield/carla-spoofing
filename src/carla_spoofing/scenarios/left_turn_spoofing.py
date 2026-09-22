@@ -1438,6 +1438,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
     import carla
 
     outcome = Outcome(run=cfg.run, mode="carla")
+    _run_t0 = time.monotonic()
     client = carla.Client(args.host, args.port)
     client.set_timeout(args.timeout)
     world, previous_map = _ensure_map(client, MAP_NAME, args.timeout,
@@ -1508,10 +1509,11 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
     outcome.notes.append(hover_note)
 
     if not args.no_fly_drone:
+        _d0 = time.monotonic()
         status = place_drone_at(world, args.host, cfg.drone_position,
                                 yaw_deg=drone_yaw,
                                 timeout_s=args.drone_timeout)
-        print(f"[lta] {status}")
+        print(f"[lta] {status} [{time.monotonic() - _d0:.1f}s]")
         outcome.notes.append(status)
 
     original_settings = world.get_settings()
@@ -1717,9 +1719,11 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
                                                          steer=0.0, brake=1.0))
                 except Exception:                  # noqa: BLE001
                     pass
-            hold_until = time.monotonic() + args.linger
+            _h0 = time.monotonic()
+            hold_until = _h0 + args.linger
             while time.monotonic() < hold_until:
                 world.tick()
+            print(f"[lta] held for {time.monotonic() - _h0:.1f}s")
 
     finally:
         try:
@@ -1738,6 +1742,8 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
         except Exception:
             pass
 
+    print(f"[lta] run '{cfg.run}' took {time.monotonic() - _run_t0:.1f}s "
+          f"of wall clock end to end")
     if ego_ctrl is not None:
         outcome.ego_state_changes = [[round(t, 2), s] for t, s in ego_ctrl.history]
     if attack is not None:
