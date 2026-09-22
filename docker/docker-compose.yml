@@ -19,6 +19,9 @@ services:
       # down a level while a second client (auto_traffic.py) still owns actors and
       # the AirSim plugin lives in the same engine, and it intermittently hangs.
       MAP: "${MAP:-Town01}"
+      # Background traffic. The scenarios clear it anyway, but 0 keeps it out
+      # of the world entirely, which is tidier when recording a scene.
+      SPAWN_TRAFFIC: "${SPAWN_TRAFFIC:-1}"
       CARLA_PORT: "2000"
       # Window mode is the DEFAULT (on-screen UE4 window). Needs an X server and
       # `xhost +local:` first (scripts/run_sim_gui.sh does that for you). On a

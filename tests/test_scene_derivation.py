@@ -188,3 +188,63 @@ def test_placement_walk_still_uses_fine_steps():
     assert default <= 2.0
     scan_default = inspect.signature(lt.spawns_reaching).parameters["step_m"].default
     assert scan_default > default
+
+
+def test_stranger_sweep_spares_the_scene_and_the_drone():
+    """Uninvited traffic must go; our actors and the attacker must not.
+
+    A background car drove into the scene mid-run and was left unmanaged at
+    teardown. Sweeping is not cosmetic: a stray vehicle can occlude the hazard,
+    hit the ego, or trip the collision sensor, any of which changes the result
+    without saying so.
+    """
+    from carla_spoofing.scenarios.left_turn_spoofing import _sweep_strangers
+
+    class Actor:
+        def __init__(self, id_, type_id):
+            self.id, self.type_id, self.alive = id_, type_id, True
+
+        def destroy(self):
+            self.alive = False
+
+    class Actors(list):
+        def filter(self, pattern):
+            stem = pattern.replace("*", "")
+            return [a for a in self if a.type_id.startswith(stem)]
+
+    ego = Actor(1, "vehicle.tesla.cybertruck")
+    hazard = Actor(2, "vehicle.audi.tt")
+    drone = Actor(3, "vehicle.airsim.drone")     # defensive: excluded by name
+    stray = Actor(4, "vehicle.nissan.patrol")
+    walker = Actor(5, "walker.pedestrian.0001")
+
+    class World:
+        def get_actors(self):
+            return Actors([ego, hazard, drone, stray, walker])
+
+    assert _sweep_strangers(World(), {ego.id, hazard.id}) == 1
+    assert stray.alive is False
+    assert ego.alive and hazard.alive, "destroyed our own scene"
+    assert drone.alive, "destroyed the attacker"
+    assert walker.alive, "only vehicles are swept"
+
+
+def test_a_failing_destroy_does_not_break_the_run():
+    """Actors vanish between listing and destroying; that must not be fatal."""
+    from carla_spoofing.scenarios.left_turn_spoofing import _sweep_strangers
+
+    class Stubborn:
+        id, type_id = 9, "vehicle.x.y"
+
+        def destroy(self):
+            raise RuntimeError("already destroyed")
+
+    class Actors(list):
+        def filter(self, _p):
+            return list(self)
+
+    class World:
+        def get_actors(self):
+            return Actors([Stubborn()])
+
+    assert _sweep_strangers(World(), set()) == 0

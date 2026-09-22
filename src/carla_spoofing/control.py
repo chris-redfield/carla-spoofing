@@ -573,7 +573,7 @@ class LeftTurnParams:
     turn_speed_mps: float = 18.0 * KMH     # you slow down to turn across traffic
     stop_decel_mps2: float = 2.0           # comfortable approach to the line
     creep_speed_mps: float = 1.0           # holding speed at the line
-    hold_tolerance_m: float = 2.0          # "at the line" band
+    hold_tolerance_m: float = 1.0          # "at the line" band
     # Once this far along the turn path the manoeuvre is committed: the ego is
     # out in the junction, where stopping is more dangerous than continuing.
     # Its real-world analogue is the point of no return every driver knows, and

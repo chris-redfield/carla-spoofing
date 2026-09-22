@@ -154,7 +154,14 @@ class ScenarioConfig:
     hazard_min_speed_kmh: float = 15.0
     hazard_max_speed_kmh: float = 55.0
     crossing_speed_kmh: float = 35.0
-    stop_line_m: float = 6.0          # stop line, back from the junction centre
+    # Where the ego holds, measured back from the last waypoint before the
+    # junction -- which is itself already a couple of metres short of the
+    # boundary. Kept small because the offsets stack: at 6 m, plus the 2 m
+    # walk_back step, plus the controller's hold tolerance, the ego stopped
+    # ~10 m short of the painted line. This is pure geometry and owes nothing
+    # to the messages: what the RSU says decides WHETHER it goes, never WHERE
+    # it stops.
+    stop_line_m: float = 2.0
     # How far INTO the junction the ego drives before it starts turning. A car
     # stopped at the line does not pivot from there -- it pulls forward and
     # turns from inside. Starting the arc at the line made the ego cut the
@@ -1313,6 +1320,36 @@ def _freeze_lights_green(carla, world, center: Vec3, radius_m: float = 60.0) -> 
     return f"froze {n} traffic light(s) green at the junction (permissive left turn)"
 
 
+def _sweep_strangers(world, keep_ids) -> int:
+    """Destroy any vehicle in the world that is not part of this scene.
+
+    The container spawns background traffic at startup (``SPAWN_TRAFFIC``,
+    10 vehicles by default) and it is cleared once at setup -- but a car already
+    under way can still drive into the scene afterwards, and between the honest
+    and spoofed runs more can appear. One did: it came down the ego's own street
+    mid-run, and at teardown -- when our actors are destroyed and synchronous
+    mode is handed back -- it was left unmanaged and crashed.
+
+    Uninvited traffic is not a neutral bystander here. It can occlude the
+    hazard, collide with the ego, or trip the collision sensor, any of which
+    silently changes the result. So the scene is swept once per messaging
+    round rather than only at the start.
+
+    The AirSim drone is not a ``vehicle.*`` actor, but it is excluded by name as
+    well -- destroying the attacker would be an unhelpful surprise.
+    """
+    removed = 0
+    for actor in world.get_actors().filter("vehicle.*"):
+        if actor.id in keep_ids or "drone" in actor.type_id.lower():
+            continue
+        try:
+            actor.destroy()
+            removed += 1
+        except Exception:                          # noqa: BLE001 - best effort
+            pass
+    return removed
+
+
 def _find_drone(world):
     for a in world.get_actors():
         if "drone" in a.type_id.lower():
@@ -1577,6 +1614,14 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
             states = _carla_states(world, spawned)
 
             if i % period == 0:
+                if cfg.clean_vehicles:
+                    gone = _sweep_strangers(world, {a.id for a in spawned})
+                    if gone:
+                        print(f"[lta] removed {gone} vehicle(s) that wandered "
+                              f"into the scene at {sim_time:.1f}s")
+                        outcome.notes.append(
+                            f"removed {gone} uninvited vehicle(s) at "
+                            f"{sim_time:.1f}s")
                 msgs = build_round(cfg, states, ego.id, drone_station_id,
                                    sim_time, attack, occluders)
                 ego_s = _ego_state(states, ego.id,

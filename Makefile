@@ -11,6 +11,10 @@ RUN ?= both
 # never sees -- and the sim would come up on the default map anyway.
 MAP ?= Town01
 export MAP
+# Background traffic the simulator spawns at startup. The scenarios clear it,
+# but 0 keeps it out of the world entirely -- tidier for recording a scene.
+SPAWN_TRAFFIC ?= 1
+export SPAWN_TRAFFIC
 # Drone hover spot, metres behind the ego start (negative = in front of it).
 # -55 puts it back over the RSU, directly above the crash, where it used to sit.
 DRONE_BACK ?= -2.5
@@ -41,7 +45,7 @@ extract:         ## Unpack the CarlaAir binary if not already extracted
 build:           ## Build the Docker image
 	$(COMPOSE) build
 
-up: gui          ## Alias for 'gui' (window mode is the default)
+up: gui          ## Alias for 'gui': make up [MAP=Town10HD] [SPAWN_TRAFFIC=0]
 
 gui:             ## Start the sim with a window on your desktop (runs xhost)
 	bash scripts/run_sim_gui.sh
