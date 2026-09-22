@@ -737,8 +737,16 @@ def describe_arms(ego_yaw_deg: float, arm_yaws: Sequence[float]) -> List[str]:
     return out
 
 
+_SPAWN_SCAN_CACHE: Dict[tuple, list] = {}
+
+
+def reset_spawn_scan_cache() -> None:
+    """Forget the cached spawn scan (e.g. after a world reload)."""
+    _SPAWN_SCAN_CACHE.clear()
+
+
 def spawns_reaching(carla, cmap, points, target_xy, radius_m: float = 25.0,
-                    max_m: float = 160.0):
+                    max_m: float = 160.0, step_m: float = 4.0):
     """Every spawn point whose road leads to the junction at ``target_xy``.
 
     The reference scene's hazard index (33) is CARLA 0.9.13 numbering; on the
@@ -749,20 +757,33 @@ def spawns_reaching(carla, cmap, points, target_xy, radius_m: float = 25.0,
     Returns ``[(index, distance_m, approach_yaw)]`` sorted by distance, so a
     caller can pick one with a sensible run-up rather than the first that fits.
     """
+    key = (round(target_xy[0], 1), round(target_xy[1], 1), radius_m, max_m,
+           step_m, len(points))
+    if key in _SPAWN_SCAN_CACHE:
+        return _SPAWN_SCAN_CACHE[key]
+
     found = []
     for idx, tf in enumerate(points):
+        # Prune before walking: a spawn further away in a straight line than the
+        # walk could ever cover cannot reach this junction, and skipping it
+        # costs nothing. Without this the scan walks all 155 spawn points, and
+        # since every step is an RPC round trip a single run spent ~50,000 calls
+        # here -- which is what made the scenario take minutes to start.
+        if math.dist((tf.location.x, tf.location.y), target_xy) > max_m:
+            continue
         wp = cmap.get_waypoint(tf.location, project_to_road=True,
                                lane_type=carla.LaneType.Driving)
         if wp is None:
             continue
         before, jwp, _j, travelled, _p = walk_to_junction(
-            carla, wp, max_m=max_m)
+            carla, wp, max_m=max_m, step_m=step_m)
         if jwp is None:
             continue
         jl = jwp.transform.location
         if math.dist((jl.x, jl.y), target_xy) <= radius_m:
             found.append((idx, travelled, before.transform.rotation.yaw))
     found.sort(key=lambda r: r[1])
+    _SPAWN_SCAN_CACHE[key] = found
     return found
 
 
@@ -1386,6 +1407,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
                                       args.allow_map_reload)
     if previous_map:
         outcome.notes.append(f"reloaded map from {previous_map} to {MAP_NAME}")
+        reset_spawn_scan_cache()   # waypoint ids and spawn points are all new
 
     try:
         world.set_weather(getattr(carla.WeatherParameters, WEATHER))
@@ -1407,7 +1429,9 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
                 "world; they may disturb the scene.")
             print("[lta] WARNING: " + outcome.notes[-1])
 
+    _t0 = time.monotonic()
     scene = _derive_transforms(carla, world, cfg, args)
+    print(f"[lta] scene derived in {time.monotonic() - _t0:.1f}s")
     print(f"[lta] placement: {scene['note']}")
     outcome.notes.append(f"placement: {scene['note']}")
     # Approach lengths are whatever the chosen spawn points give; the hazard's
@@ -1538,6 +1562,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
         seq = 0
         warned = False
         last_truth: Optional[LeftTurnDecision] = None
+        _loop_t0 = time.monotonic()
         wall_deadline = time.monotonic() + args.wall_timeout
         crash_until: Optional[float] = None
 
@@ -1623,6 +1648,8 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
             if crash_until is not None and sim_time >= crash_until:
                 break
 
+        print(f"[lta] simulated {sim_time:.1f}s of scene in "
+              f"{time.monotonic() - _loop_t0:.1f}s of wall clock")
         if args.linger > 0:
             print(f"[lta] holding the scene for {args.linger:.0f}s ...")
             hold_until = time.monotonic() + args.linger

@@ -130,3 +130,61 @@ def test_scene_turn_path_starts_with_a_straight_run():
     drift = max(abs((p[0] - start[0]) * right[0] + (p[1] - start[1]) * right[1])
                 for p in early)
     assert drift < 0.3, f"turn begins bending immediately ({drift:.2f} m)"
+
+
+def test_spawn_scan_is_cached_and_pruned():
+    """The scan is RPC-bound, so it must be cheap and must not repeat.
+
+    Every step of a road walk is a round trip to the simulator. Scanning all
+    155 spawn points twice per run, for two runs, cost ~50,000 calls and made
+    the scenario take minutes to start. Two fixes, both asserted here: prune
+    spawns that are too far away to possibly reach the junction, and cache the
+    result so ego and hazard selection share one scan.
+    """
+    import carla_spoofing.scenarios.left_turn_spoofing as lt
+
+    lt.reset_spawn_scan_cache()
+    carla = fake_carla.make_module()
+    world = fake_carla.World()
+    cmap = world.get_map()
+    points = cmap.get_spawn_points()
+
+    calls = {"n": 0}
+    real_walk = lt.walk_to_junction
+
+    def counting_walk(*a, **k):
+        calls["n"] += 1
+        return real_walk(*a, **k)
+
+    lt.walk_to_junction = counting_walk
+    try:
+        first = lt.spawns_reaching(carla, cmap, points, (0.0, 0.0))
+        after_first = calls["n"]
+        second = lt.spawns_reaching(carla, cmap, points, (0.0, 0.0))
+        assert second == first
+        assert calls["n"] == after_first, "second scan should hit the cache"
+
+        # Pruning must not drop anything reachable: a spawn further away in a
+        # straight line than the walk budget cannot reach the junction, since
+        # road distance is never shorter than straight-line distance.
+        lt.reset_spawn_scan_cache()
+        calls["n"] = 0
+        lt.spawns_reaching(carla, cmap, points, (0.0, 0.0), max_m=1.0)
+        assert calls["n"] == 0, "a 1 m budget should prune every spawn"
+    finally:
+        lt.walk_to_junction = real_walk
+        lt.reset_spawn_scan_cache()
+
+
+def test_placement_walk_still_uses_fine_steps():
+    """The coarse step is for the SCAN only.
+
+    Placement walks must stay fine-grained: a 4 m step could stride over a
+    short junction and miss it entirely.
+    """
+    import inspect
+    import carla_spoofing.scenarios.left_turn_spoofing as lt
+    default = inspect.signature(lt.walk_to_junction).parameters["step_m"].default
+    assert default <= 2.0
+    scan_default = inspect.signature(lt.spawns_reaching).parameters["step_m"].default
+    assert scan_default > default
