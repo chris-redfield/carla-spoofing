@@ -1904,9 +1904,13 @@ def main(argv=None):
     p.add_argument("--crash-hold", type=float, default=3.0,
                    help="seconds to keep simulating after a collision, so the "
                         "crash is visible rather than the last frame")
-    p.add_argument("--linger", type=float, default=7.0,
+    p.add_argument("--linger", type=float, default=4.0,
                    help="seconds to hold the finished scene before destroying "
-                        "the vehicles (0 = tear down at once)")
+                        "the vehicles (0 = tear down at once). Shorter than the "
+                        "do-not-pass scenario's 7 s: this one ends with the cars "
+                        "stopped in the junction rather than wrecked mid-road, "
+                        "so it reads in less time. Counted in REAL seconds, not "
+                        "sim seconds -- the sim runs faster than real time.")
     p.add_argument("--wall-timeout", type=float, default=600.0,
                    help="hard wall-clock budget for one run")
     p.add_argument("--duration", type=float, default=60.0)

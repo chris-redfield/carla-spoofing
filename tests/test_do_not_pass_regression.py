@@ -147,3 +147,24 @@ def test_the_mock_scenario_still_produces_its_verdict(tmp_path):
     assert verdict["attack_caused_collision"] is True
     assert verdict["honest_unsafe_overtake"] is False
     assert verdict["honest_collision"] is False
+
+
+def test_the_two_scenarios_keep_their_own_linger_defaults():
+    """They hold the finished scene for different lengths, on purpose.
+
+    Do-not-pass ends with a wreck mid-road and holds 7 s; the left turn ends
+    with the cars stopped in the junction and holds 4 s. Asserted because the
+    two scenarios share most of their teardown, so a well-meant tidy-up could
+    easily collapse them onto one value.
+    """
+    import inspect
+    import re
+    from carla_spoofing.scenarios import do_not_pass_spoofing, left_turn_spoofing
+
+    def linger_default(mod):
+        src = inspect.getsource(mod.main)
+        return float(re.search(r'--linger", type=float, default=([0-9.]+)',
+                               src).group(1))
+
+    assert linger_default(left_turn_spoofing) == 4.0
+    assert linger_default(do_not_pass_spoofing) == 7.0
