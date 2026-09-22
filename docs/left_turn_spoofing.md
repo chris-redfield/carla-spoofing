@@ -70,6 +70,91 @@ we want it later.
 
 ---
 
+## How a run works, step by step
+
+Both runs are the same code, the same scene and the same controller. The only
+difference is which message stream the ego believes.
+
+### Setup — identical for both
+
+```
+1. Connect; check the sim is on Town10HD (stop if not -- never reload it)
+2. Census the world, destroy any pre-existing vehicles
+3. Ego    <- spawn point 151, ~42 m from the junction
+   Hazard <- spawn point 46, chosen FROM THE MAP: a road that actually
+             feeds this junction, approaching from the left
+4. Solve the hazard's speed so it arrives ~2 s after the ego
+5. Freeze every light at the junction GREEN  (a permissive left turn)
+6. Query the corner buildings -> static occluders
+7. Place the drone back down the ego's approach, 20 m up
+8. Synchronous mode, 0.05 s per tick
+```
+
+From here two rates run: **control at 20 Hz**, **messages at 1 Hz**.
+
+### Each messaging round (once per simulated second)
+
+Four CPMs are built from CARLA's ground truth:
+
+| sender | range | sees |
+|---|---|---|
+| **RSU**, station 9001 | 160 m | everything — infrastructure outranges its receivers |
+| **ego**, its own id | 75 m | filtered through the corner buildings: **not the hazard** |
+| **drone**, station 9002 | 160 m | everything, honestly |
+| **the forgery** | — | the drone's CPM, hazard deleted, re-stamped **as station 9001** |
+
+Then they are fused, and a **third** decision is computed from omniscient
+ground truth. Nobody acts on that one; it is the scoring reference.
+
+### Each tick
+
+The controller takes the latest decision and steps. Its **only** trigger is that
+decision — no timers, no scripted steering. Every tick writes a `trajectory.csv`
+row: pose, throttle/steer/brake, and the pure-pursuit target point.
+
+### The honest run
+
+```
+t=0        APPROACH   drives ~42 m toward the junction
+t~4        DO_NOT_TURN -- the RSU reports the hazard
+                      brakes to the stop line
+t=9.8      WAITING    holds while the hazard crosses in front of it
+t=13.0     TURN       the junction is genuinely clear: pulls in and turns
+t=17.0     CLEARED    out the other side. No collision.
+```
+
+It **does** turn. The honest ego is not a car that never goes; it is a car that
+goes once the road is actually clear. Scoring against "did it turn" would
+therefore prove nothing, which is why ground truth is scored instead.
+
+### The attack run
+
+```
+t=0        APPROACH   identical start, identical speed
+t~4        TURN       the forgery says the junction is empty
+                      never slows, never stops
+t=8.15     TURNING    commits within 8 m of the line
+t=11.75    the hazard arrives. Collision at the crossover.
+```
+
+Ground truth said `DO_NOT_TURN` at the moment it committed — which is what makes
+it an *unsafe* turn rather than merely a turn.
+
+### Why the attacked ego never stops
+
+Requiring a full halt at the line was an earlier simplification: it made both
+runs pause identically and hid the difference. A driver who can see the junction
+is clear flows through; one who cannot stops and waits. `commit_within_m` (8 m)
+lets the ego commit while still rolling, so the behavioural signature of the
+attack is now "never even slowed down".
+
+Both runs still decide over the same stretch of road, so the comparison remains
+about beliefs and not about geometry. Measured: 2.5–9 m works; at 14 m the
+junction still reads clear in *both* runs and the honest ego commits too, then
+has to abort.
+
+---
+
 ## Why impersonation is required
 
 Identical to the do-not-pass case, and just as load-bearing. A receiver keeps **one entry
@@ -121,6 +206,49 @@ make left-turn RUN=spoofed   # just the crash
 make left-turn RUN=honest    # just the safe baseline
 make left-turn-mock          # the same closed loop with no simulator at all
 ```
+
+A single run writes its files but produces **no verdict**: every headline claim
+is a *difference* between the two runs, so one run alone is a recording, not a
+result.
+
+Background traffic is swept out of the scene once per messaging round, but it is
+tidier not to spawn it at all:
+
+```bash
+make down && make up MAP=Town10HD SPAWN_TRAFFIC=0
+```
+
+`SPAWN_TRAFFIC` only applies when the **simulator** starts, and `make left-turn`
+never restarts it. Pedestrians are left alone either way — they are not vehicles
+and cannot affect the decision.
+
+The finished scene is held for 4 s before teardown (`--linger`; do-not-pass uses
+7 s). Counted in **real** seconds, not sim seconds.
+
+### Survey first, when something looks wrong
+
+```bash
+make left-turn-survey
+```
+
+Read-only: spawns nothing, drives nothing, sends no messages. It prints each
+spawn point's pose, the junction ahead of it, that junction's arms with their
+bearings, which exit is the left turn, every spawn that feeds the junction, and
+— the line that matters — whether the ego and the hazard reach the **same** one.
+
+Every failure this scenario has had was geometry that was inferred and never
+checked. Ten seconds here beats a full run.
+
+### Which spawn points, and why they are chosen from the map
+
+The reference scene's indices are CARLA 0.9.13 numbering. On this 0.9.16 build
+the ego's (126) still lands on the right road but only **16 m** from the line,
+and the hazard's (33) lands **154 m away at a different junction** entirely.
+
+So both are selected from the map instead: the ego gets the longest approach on
+its own road (**151**, ~42 m), the hazard the longest road feeding the junction
+from a conflicting direction (**46**, ~50 m). `--ego-spawn` / `--hazard-spawn`
+override. Asking the map cannot go stale the way a constant does.
 
 Useful flags: `--crossing-back` (how far back the hazard starts), `--crossing-speed`,
 `--ego-back`, `--stop-line`, `--live-lights`, `--no-fly-drone`.
@@ -175,46 +303,36 @@ t     state     x       y      yaw     steer  target(x,y)       prog
 
 ## Results (mock backend)
 
-Both runs put the ego at the stop line at **2.6 s**. Everything after that is belief.
+Both runs start identically. Everything after that is belief.
 
 | | honest | spoofed |
 |---|---|---|
-| reaches the line | 2.6 s | 2.6 s |
-| starts the turn | **6.0 s** | **2.6 s** (at once) |
+| reaches the line | 9.8 s, **stops** | never stops |
+| starts the turn | **13.0 s** | **8.15 s** |
 | ground truth at that moment | `TURN` | `DO_NOT_TURN` |
-| collision | none | **4.90 s, in the junction** |
-| completes the turn | 10.1 s | — |
+| collision | none | **11.75 s, in the junction** |
+| completes the turn | 17.0 s | — |
 
 ```
 attack_caused_unsafe_turn  : true
 attack_caused_collision    : true
 honest_unsafe_turn         : false
 honest_collision           : false
+evidence_valid             : true
 ```
 
-The honest ego **does turn** — it is supposed to, once the junction is genuinely clear.
-That is why the run is scored against an omniscient ground-truth decision rather than
-against "did it turn at all".
+The honest ego **does turn** — it is supposed to, once the junction is genuinely
+clear. That is why the run is scored against an omniscient ground-truth decision
+rather than against "did it turn at all".
 
-Live CARLA: the junction is found correctly. The **first live run drove the ego across
-the junction** — `Junction.get_waypoints()` returns one `(entry, exit)` pair per turning
-movement through the whole junction, and the exit was being chosen by "most leftward"
-without checking the movement started on the *ego's own arm*. It could therefore return
-the exit of a turn beginning on a different approach, and the ego faithfully steered at
-it. Fixed in `pick_left_exit`, which filters by entry arm first and is unit-tested at
-six ego headings. Two supporting fixes: the turn path now runs `--exit-run-out` past the
-junction so the controller has something to aim at while it straightens up, and the
-controller uses tighter gains (4–9 m lookahead instead of 5–18) because an 18 m lookahead
-on a ~20 m arc puts the target at the exit and cuts the corner.
-
-Still to confirm on the live map: that the corrected turn tracks the lane.
-
----
+Live CARLA: the junction, the approach, the turn shape and the pole clearance
+are all resolved (see the log below). The end-to-end attack result on the live
+map is **not yet confirmed**.
 
 ## Guards against a hollow result
 
-Two things in this scenario can make a collision look like evidence when it is not. Both
-announce themselves rather than sitting silently in the output.
+Six things can make a collision look like evidence when it is not. Every one of
+them announces itself rather than sitting silently in the output.
 
 **1. The corner might not actually occlude.** If the ego can see the crossing vehicle with
 its own sensors, the suppressed RSU report is irrelevant to its decision and any collision
@@ -226,10 +344,38 @@ corner is not occluding it. The suppressed RSU report is then irrelevant to the 
 and any collision is NOT evidence of the attack.
 ```
 
-**2. The forgery might delete nothing.** An impersonated CPM supersedes the RSU's whether
+**2. The ego might hit scenery.** The collision sensor fires for anything, so
+clipping a pole registered as a crash — in the *honest* run, which would have
+cancelled the signal. Collisions are now classified: `collided` counts
+**vehicle-vs-vehicle only**, scenery goes to `hit_scenery` and invalidates the
+run. A car that cannot drive the junction cleanly cannot tell us anything about
+spoofing.
+
+**3. The ego might never turn at all.** A spawn on the wrong road leaves it
+driving to a stop line that is not there, waiting out the whole run.
+
+**4. The forgery might delete nothing.** An impersonated CPM supersedes the RSU's whether
 or not the attacker edited it, so a run can collide with an empty `removed_ids` column.
 `test_attack_actually_removed_something` asserts it did. This trap was found the hard way
 in the do-not-pass scenario.
+
+**5. The two runs might not differ at all.** Zero decision flips, or both runs
+committing at the same instant, means the message stream changed nothing.
+
+**6. A collision might land where ground truth said SAFE** — then whatever caused
+it, it was not the attack.
+
+All six print
+
+```
+THIS RUN IS NOT EVIDENCE OF THE ATTACK, whatever the verdict says:
+  - ...
+```
+
+and exit non-zero. They exist because a live run once reported
+`attack_caused_collision: true` while the hazard had stalled 50 m short of the
+junction and the two cars had simply collided by coincidence. **The verdict flags
+are not trusted on their own.**
 
 ---
 
