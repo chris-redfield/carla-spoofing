@@ -12,7 +12,7 @@ scenario runner can apply any attack uniformly.
 """
 from .base import Attack, AttackResult, NoAttack
 from .fake_object import FakeObjectAttack, FakeObjectSpec
-from .remove_object import RemoveObjectAttack, RemoveTarget
+from .remove_object import RemoveObjectAttack, RemoveObjectsAttack, RemoveTarget
 from .identity_spoof import IdentitySpoofAttack, ForgedIdentity
 from .camera_injection import (
     CameraInjectionAttack,
@@ -26,6 +26,7 @@ ATTACKS = {
     "none": NoAttack,
     "fake_object": FakeObjectAttack,
     "remove_object": RemoveObjectAttack,
+    "remove_objects": RemoveObjectsAttack,
     "camera": CameraInjectionAttack,
     "identity_spoof": IdentitySpoofAttack,
 }
@@ -33,7 +34,7 @@ ATTACKS = {
 __all__ = [
     "Attack", "AttackResult", "NoAttack",
     "FakeObjectAttack", "FakeObjectSpec",
-    "RemoveObjectAttack", "RemoveTarget",
+    "RemoveObjectAttack", "RemoveObjectsAttack", "RemoveTarget",
     "IdentitySpoofAttack", "ForgedIdentity",
     "CameraInjectionAttack", "CameraProjector",
     "VehicleImageGenerator", "ProceduralCarGenerator", "ExternalCommandGenerator",

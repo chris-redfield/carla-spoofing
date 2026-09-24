@@ -19,6 +19,7 @@ dev = ["pytest>=7"]
 [project.scripts]
 carla-spoof = "carla_spoofing.scenarios.run_scenario:main"
 carla-do-not-pass = "carla_spoofing.scenarios.do_not_pass_spoofing:main"
+carla-vru-warning = "carla_spoofing.scenarios.intersection_vru_spoofing:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

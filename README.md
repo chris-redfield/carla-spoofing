@@ -110,6 +110,45 @@ emergent, not coded.
 Outputs land in `out/do_not_pass/{honest,spoofed}/`, plus a top-level
 `comparison.json` with the verdict.
 
+## Scenario: VRU Crossing Warning spoofing
+
+A **drone impersonating a Road Side Unit** makes a car run over a cyclist and a
+pedestrian. Four-way crossroads on **Town01**: the ego approaches while the two
+VRUs (Vulnerable Road Users) cross from the blind side street, and an **RSU**
+broadcasts a CPM covering the crossing. The drone rebroadcasts that view stamped
+with the **RSU's station id**, minus both VRUs — so the ego's crossing assistant
+concludes nobody is coming.
+
+- **Cenário 1 — Operação Nominal (`make vru-warning RUN=honest`):** o pedestre e
+  o ciclista realizam a travessia no cruzamento em rota de colisão com o
+  veículo. A RSU detecta os usuários vulneráveis e emite um alerta seguro de
+  frenagem, fazendo com que o veículo pare a tempo e evite o acidente.
+- **Cenário 2 — Ataque de *Spoofing* (`make vru-warning RUN=spoofed`):** durante
+  a mesma travessia do pedestre e do ciclista, um drone executa um ataque de
+  *spoofing* contra a comunicação V2X. A mensagem adulterada instrui o veículo
+  a ignorar o risco e manter sua trajetória no cruzamento, resultando no
+  atropelamento de ambos.
+
+```bash
+make up                # start the sim (Town01 by default — where this scene lives)
+make vru-warning        # honest baseline + attack run, then the comparison
+make vru-warning-mock   # the same closed loop with no simulator at all
+```
+
+**This scenario is closed-loop, and deliberately unscripted**, same as
+Do-Not-Pass: the ego is driven only by its own controller reacting to the
+messages it receives, so the honest and spoofed runs differ in nothing but the
+message stream.
+
+| | honest run | spoofed run |
+|---|---|---|
+| crossing decision | brakes to a full stop, waits for both VRUs to clear | never warned, drives straight through |
+| ground truth at that moment | cyclist + pedestrian on the crossing | cyclist + pedestrian on the crossing |
+| collision | none | hits the cyclist and the pedestrian |
+
+Outputs land in `out/vru_warning/{honest,spoofed}/`, plus a top-level
+`comparison.json` with the verdict.
+
 ## Outputs (in `out/`)
 
 | File | Purpose |
