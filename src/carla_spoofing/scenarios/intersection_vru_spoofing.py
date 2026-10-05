@@ -133,9 +133,11 @@ from ..control import (
 )
 from ..do_not_pass_warning import EgoState, heading_unit, relative_to_ego
 from ..drone import place_at as place_drone_at
+from ..evidence import (ManoeuvreSpec, evidence_problems, is_road_user,
+                        report as report_evidence)
 from ..fusion import fuse_latest_by_station
 from ..perception import ObjectState, build_cpm_from_objects, carla_states_from_snapshot
-from ..report import CrossingDecisionWriter, ReportWriter
+from ..report import CrossingDecisionWriter, ReportWriter, write_comparison
 from ..v2x.cpm import CollectivePerceptionMessage
 from ..v2x.packet import FileSink, NullSink, Packet, UdpSink
 from ..vru_warning import STOP, VRU_CLASSES, VRUCrossingDecision, evaluate_crossing
@@ -437,6 +439,7 @@ class Outcome:
     collisions: List[dict] = field(default_factory=list)   # one entry per distinct victim, first hit
                                                              # PT: uma entrada por vítima distinta, no primeiro impacto
     both_vrus_hit: bool = False
+    static_collision: Optional[dict] = None    # scenery: a driving fault
     n_decisions: int = 0
     n_flips: int = 0
     first_flip_s: Optional[float] = None
@@ -457,6 +460,8 @@ class Outcome:
             "collisions": self.collisions,
             "collided": bool(self.collisions),
             "both_vrus_hit": self.both_vrus_hit,
+            "static_collision": self.static_collision,
+            "hit_scenery": self.static_collision is not None,
             "n_decisions": self.n_decisions, "n_flips": self.n_flips,
             "first_flip_s": self.first_flip_s,
             "ego_state_changes": self.ego_state_changes,
@@ -1040,7 +1045,8 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         cs_bp = bl.find("sensor.other.collision")
         collision_sensor = world.spawn_actor(cs_bp, carla.Transform(), attach_to=ego)
         collision_sensor.listen(lambda e: collisions.append({
-            "with_actor_id": e.other_actor.id, "with_type_id": e.other_actor.type_id}))
+            "with_actor_id": e.other_actor.id, "with_type_id": e.other_actor.type_id,
+            "is_road_user": is_road_user(e.other_actor.type_id)}))
 
         spectator = world.get_spectator()
         spectator.set_transform(carla.Transform(
@@ -1193,6 +1199,17 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
 
             for ev in collisions[n_collisions_seen:]:
                 actor_id = ev["with_actor_id"]
+                # A kerb or the RSU's own pole is a driving fault, not a victim:
+                # scoring it as one would put hit_scenery's cause straight into
+                # attack_caused_collision.
+                if not ev["is_road_user"]:
+                    if outcome.static_collision is None:
+                        outcome.static_collision = dict(ev)
+                        outcome.static_collision["sim_time"] = round(sim_time, 2)
+                        print(f"[vru] the ego hit scenery ({ev['with_type_id']}) "
+                              f"at {sim_time:.2f}s -- that is a driving fault, "
+                              f"not the attack")
+                    continue
                 if actor_id in hit_ids:
                     continue
                 hit_ids.add(actor_id)
@@ -1303,6 +1320,32 @@ def _one_run(args, run_name: str) -> dict:
     return d
 
 
+SPEC = ManoeuvreSpec(
+    label="crossing",
+    commit_time_key="crossed_s",
+    unsafe_key="crossing_was_unsafe",
+    # Asymmetric on purpose, unlike the other two scenarios. The honest ego's
+    # correct behaviour here is to STOP, so a baseline that never stopped is not
+    # a baseline: there was no safe behaviour for the attack to subvert, and the
+    # warning it was supposed to obey may never have reached it. The spoofed ego,
+    # conversely, has to actually cross for the forgery to have done anything.
+    required={
+        HONEST: ("ego_stopped",
+                 "NEVER STOPPED -- the honest baseline is supposed to hold at "
+                 "the stop line for the VRUs, so there is no safe behaviour for "
+                 "the attack to subvert. Check vru_crossing_decisions.csv: if "
+                 "truth_decision never says STOP, the VRUs were never actually "
+                 "in conflict with the ego's path"),
+        SPOOFED: ("ego_crossed",
+                  "NEVER CROSSED -- it never passed the point of no return, so "
+                  "the forged messages changed nothing it did"),
+    },
+    artifacts=("Check out/vru_warning/<run>/vru_crossing_decisions.csv to see "
+               "what the ego believed, and messages.csv for what was actually "
+               "broadcast."),
+)
+
+
 def _verdict(results: Dict[str, dict]) -> dict:
     """The headline comparison: did the attack, and only the attack, cause it?
 
@@ -1363,18 +1406,18 @@ def main(argv=None):
 
     runs = [HONEST, SPOOFED] if args.run == "both" else [args.run]
     results = {r: _one_run(args, r) for r in runs}
+    ev = evidence_problems(results, SPEC)
     summary = {"mode": args.mode, "map": MAP_NAME if args.mode == "carla" else "mock",
-               "runs": results, "verdict": _verdict(results)}
-    os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "comparison.json"), "w") as fh:
-        json.dump(summary, fh, indent=2)
+               "runs": results, "verdict": _verdict(results), **ev.to_summary()}
+    write_comparison(args.out, summary, runs)
     print(json.dumps(summary, indent=2))
 
     for name, r in results.items():
         print(f"\n[{name}] stopped={r['ego_stopped']} "
               f"collision={r['collided']} both_vrus_hit={r['both_vrus_hit']} "
               f"flips={r['n_flips']}/{r['n_decisions']} -> {r['out_dir']}")
-    return 0
+
+    return report_evidence(ev, SPEC)
 
 
 if __name__ == "__main__":

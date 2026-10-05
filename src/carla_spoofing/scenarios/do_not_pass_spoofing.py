@@ -67,13 +67,15 @@ from ..control import (
     KinematicVehicle, OvertakeParams, StraightLaneReference, VehicleCommand,
 )
 from ..drone import place_at as place_drone_at
+from ..evidence import (ManoeuvreSpec, evidence_problems, is_road_user,
+                        report as report_evidence)
 from ..do_not_pass_warning import (
     DO_NOT_PASS, PASS, DoNotPassDecision, DoNotPassThresholds, EgoState,
     evaluate_do_not_pass, heading_unit, relative_to_ego,
 )
 from ..fusion import fuse_latest_by_station, visible_objects
 from ..perception import ObjectState, build_cpm_from_objects, carla_states_from_snapshot
-from ..report import DecisionWriter, ReportWriter
+from ..report import DecisionWriter, ReportWriter, write_comparison
 from ..v2x.cpm import CollectivePerceptionMessage
 from ..v2x.packet import FileSink, NullSink, Packet, UdpSink
 
@@ -295,7 +297,8 @@ class Outcome:
     overtake_was_unsafe: bool = False       # ground truth said DO_NOT_PASS
     truth_at_overtake: str = ""
     max_lateral_offset_m: float = 0.0
-    collision: Optional[dict] = None
+    collision: Optional[dict] = None           # a road user: the scored crash
+    static_collision: Optional[dict] = None    # scenery: a driving fault
     n_decisions: int = 0
     n_flips: int = 0
     first_flip_s: Optional[float] = None
@@ -321,6 +324,8 @@ class Outcome:
             "max_lateral_offset_m": round(self.max_lateral_offset_m, 2),
             "collision": self.collision,
             "collided": self.collision is not None,
+            "static_collision": self.static_collision,
+            "hit_scenery": self.static_collision is not None,
             "n_decisions": self.n_decisions, "n_flips": self.n_flips,
             "first_flip_s": self.first_flip_s,
             "ego_state_changes": self.ego_state_changes,
@@ -888,6 +893,7 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
         collision_sensor.listen(lambda e: collisions.append({
             "with_actor_id": e.other_actor.id,
             "with_type_id": e.other_actor.type_id,
+            "is_road_user": is_road_user(e.other_actor.type_id),
         }))
 
         spectator = world.get_spectator()
@@ -970,7 +976,15 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
                 seq += 1
 
             ego_st = _ego_state(states, ego.id, ego_ctrl.p.cruise_speed_mps)
-            if collisions:
+            hits = [c for c in collisions if c["is_road_user"]]
+            scenery = [c for c in collisions if not c["is_road_user"]]
+            if scenery and outcome.static_collision is None:
+                outcome.static_collision = dict(scenery[0])
+                outcome.static_collision["sim_time"] = round(sim_time, 2)
+                print(f"[dnp] the ego hit scenery "
+                      f"({outcome.static_collision['with_type_id']}) at "
+                      f"{sim_time:.2f}s -- that is a driving fault, not the attack")
+            if hits:
                 # Post-impact, let physics (momentum, friction) settle the wreck
                 # instead of the controllers still commanding throttle/steer as
                 # if nothing happened -- that reads as cars grinding through
@@ -1003,8 +1017,8 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
 
             world.tick()
 
-            if collisions and outcome.collision is None:
-                ev = collisions[0]
+            if hits and outcome.collision is None:
+                ev = hits[0]
                 outcome.collision = {
                     "sim_time": round(sim_time, 2),
                     "with_object_id": ev["with_actor_id"],
@@ -1128,6 +1142,20 @@ def _one_run(args, run_name: str) -> dict:
     return d
 
 
+SPEC = ManoeuvreSpec(
+    label="overtake",
+    commit_time_key="overtake_started_s",
+    unsafe_key="overtake_was_unsafe",
+    required={
+        HONEST: ("overtake_attempted", "NEVER OVERTOOK -- it followed the lead car for the whole run, so there is no manoeuvre to score. Its decisions CSV will show what it believed; common causes are a spawn too far back to ever close on the lead, and an oncoming car that never cleared the corridor"),
+        SPOOFED: ("overtake_attempted", "NEVER OVERTOOK -- it followed the lead car for the whole run, so there is no manoeuvre to score. Its decisions CSV will show what it believed; common causes are a spawn too far back to ever close on the lead, and an oncoming car that never cleared the corridor"),
+    },
+    artifacts=("Check out/do_not_pass/<run>/do_not_pass_decisions.csv to see "
+               "what the ego believed, and messages.csv for what was actually "
+               "broadcast."),
+)
+
+
 def _verdict(results: Dict[str, dict]) -> dict:
     """The headline comparison: did the attack, and only the attack, cause it?"""
     h, s = results.get(HONEST), results.get(SPOOFED)
@@ -1205,18 +1233,18 @@ def main(argv=None):
 
     runs = [HONEST, SPOOFED] if args.run == "both" else [args.run]
     results = {r: _one_run(args, r) for r in runs}
+    ev = evidence_problems(results, SPEC)
     summary = {"mode": args.mode, "map": MAP_NAME if args.mode == "carla" else "mock",
-               "runs": results, "verdict": _verdict(results)}
-    os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "comparison.json"), "w") as fh:
-        json.dump(summary, fh, indent=2)
+               "runs": results, "verdict": _verdict(results), **ev.to_summary()}
+    write_comparison(args.out, summary, runs)
     print(json.dumps(summary, indent=2))
 
     for name, r in results.items():
         print(f"\n[{name}] overtake={r['overtake_attempted']} "
               f"collision={r['collided']} flips={r['n_flips']}/{r['n_decisions']} "
               f"-> {r['out_dir']}")
-    return 0
+
+    return report_evidence(ev, SPEC)
 
 
 if __name__ == "__main__":

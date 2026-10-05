@@ -61,6 +61,7 @@ from ..control import (
     hermite_turn_path, straightest, walk_back,
 )
 from ..drone import place_at as place_drone_at
+from ..evidence import ManoeuvreSpec, evidence_problems, report as report_evidence
 from ..fusion import (
     StaticOccluder, fuse_latest_by_station, occluders_near, visible_objects,
 )
@@ -68,7 +69,8 @@ from ..geometry import EgoState, heading_unit
 from ..left_turn_assist import (
     DO_NOT_TURN, TURN, LeftTurnDecision, LeftTurnThresholds, evaluate_left_turn,
 )
-from ..report import LeftTurnDecisionWriter, ReportWriter, TrajectoryWriter
+from ..report import (LeftTurnDecisionWriter, ReportWriter, TrajectoryWriter,
+                      write_comparison)
 from ..perception import build_cpm_from_objects
 from ..v2x.cpm import CollectivePerceptionMessage, PerceivedObject
 from ..v2x.packet import FileSink, NullSink, Packet, UdpSink
@@ -1818,59 +1820,25 @@ def _one_run(args, run_name: str) -> dict:
     return d
 
 
-def _evidence_problems(results: Dict[str, dict]) -> List[str]:
-    """Reasons this run proves nothing, even if it ended in a collision.
-
-    Added after a live run that looked like a success and was not: both runs
-    turned at exactly the same instant, every decision row read TURN/TURN/TURN,
-    the hazard was never once counted as a conflict, and the spoofed run
-    collided purely because two cars happened to occupy the same space. The
-    verdict flags said ``attack_caused_collision: true``.
-
-    The earlier occlusion guard could not see this -- it only asks whether the
-    ego can *see* the hazard, not whether the hazard was ever *relevant*. These
-    checks ask the question that actually matters: did the attack change what
-    the ego believed, and was there ever anything real to hide?
-    """
-    problems = []
-    s = results.get(SPOOFED, {})
-    h = results.get(HONEST, {})
-
-    for name, r in (("spoofed", s), ("honest", h)):
-        if r and r.get("hit_scenery"):
-            hit = r["static_collision"]
-            problems.append(
-                f"the {name} ego hit scenery ({hit['with_type_id']}) at "
-                f"{hit['sim_time']}s -- it is not driving the junction "
-                f"correctly, so nothing about this run is trustworthy")
-    for name, r in (("spoofed", s), ("honest", h)):
-        if r and not r.get("turn_attempted"):
-            problems.append(
-                f"the {name} ego NEVER TURNED -- it never left the approach. "
-                f"Its trajectory.csv will show where it actually went; a common "
-                f"cause is a spawn that landed on the wrong road, so the car "
-                f"drives to a stop line that is not there and waits out the run")
-    if s.get("n_flips", 0) == 0:
-        problems.append(
-            "the spoofed run produced ZERO decision flips: the forged messages "
-            "never changed what the ego concluded, so nothing it did can be "
-            "attributed to the attack")
-    if not s.get("turn_was_unsafe", False) and s.get("collided"):
-        problems.append(
-            "the spoofed run collided but ground truth said the turn was SAFE "
-            "when it committed -- the collision is not the attack's doing")
-    if (h.get("turn_started_s") is not None
-            and h.get("turn_started_s") == s.get("turn_started_s")):
-        problems.append(
-            f"both runs committed at the same instant "
-            f"({s.get('turn_started_s')}s), so the message stream changed "
-            f"nothing about the manoeuvre")
-    if not s.get("attack", {}).get("removed_object_ids"):
-        problems.append(
-            "the forgery deleted nothing: an impersonated CPM supersedes the "
-            "RSU's whether or not it was edited, so any effect here is not "
-            "suppression")
-    return problems
+SPEC = ManoeuvreSpec(
+    label="turn",
+    commit_time_key="turn_started_s",
+    unsafe_key="turn_was_unsafe",
+    required={
+        HONEST: ("turn_attempted",
+                 "NEVER TURNED -- it never left the approach. Its trajectory.csv "
+                 "will show where it actually went; a common cause is a spawn "
+                 "that landed on the wrong road, so the car drives to a stop "
+                 "line that is not there and waits out the run"),
+        SPOOFED: ("turn_attempted",
+                  "NEVER TURNED -- it never left the approach. Its "
+                  "trajectory.csv will show where it actually went; a common "
+                  "cause is a spawn that landed on the wrong road, so the car "
+                  "drives to a stop line that is not there and waits out the run"),
+    },
+    artifacts=("Check out/left_turn/<run>/trajectory.csv to see what actually "
+               "moved, and left_turn_decisions.csv to see what the ego believed."),
+)
 
 
 def _verdict(results: Dict[str, dict]) -> dict:
@@ -1996,13 +1964,11 @@ def main(argv=None):
 
     runs = [HONEST, SPOOFED] if args.run == "both" else [args.run]
     results = {r: _one_run(args, r) for r in runs}
-    problems = _evidence_problems(results)
+    ev = evidence_problems(results, SPEC)
     summary = {"mode": args.mode, "map": MAP_NAME if args.mode == "carla" else "mock",
-               "runs": results, "verdict": _verdict(results),
-               "evidence_valid": not problems, "evidence_problems": problems}
+               "runs": results, "verdict": _verdict(results), **ev.to_summary()}
     os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "comparison.json"), "w") as fh:
-        json.dump(summary, fh, indent=2)
+    write_comparison(args.out, summary, runs)
     print(json.dumps(summary, indent=2))
 
     for name, r in results.items():
@@ -2010,15 +1976,7 @@ def main(argv=None):
               f"collision={r['collided']} flips={r['n_flips']}/{r['n_decisions']} "
               f"-> {r['out_dir']}")
 
-    if problems:
-        print("\n" + "=" * 72)
-        print("THIS RUN IS NOT EVIDENCE OF THE ATTACK, whatever the verdict says:")
-        for prob in problems:
-            print(f"  - {prob}")
-        print("Check out/left_turn/<run>/trajectory.csv to see what actually "
-              "moved, and left_turn_decisions.csv to see what the ego believed.")
-        print("=" * 72)
-    return 0 if not problems else 2
+    return report_evidence(ev, SPEC)
 
 
 if __name__ == "__main__":
