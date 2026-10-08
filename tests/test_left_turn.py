@@ -450,12 +450,13 @@ def test_walk_back_reports_a_short_walk_rather_than_lying():
 
 
 def test_a_run_where_the_ego_never_turns_is_flagged():
-    from carla_spoofing.scenarios.left_turn_spoofing import _evidence_problems
+    from carla_spoofing.evidence import evidence_problems
+    from carla_spoofing.scenarios.left_turn_spoofing import SPEC
     stuck = {"spoofed": {"turn_attempted": False, "n_flips": 3,
                          "attack": {"removed_object_ids": [1]}},
              "honest": {"turn_attempted": True, "turn_started_s": 9.0}}
-    problems = _evidence_problems(stuck)
-    assert any("NEVER TURNED" in p for p in problems)
+    assert any("NEVER TURNED" in p
+               for p in evidence_problems(stuck, SPEC).problems)
 
 
 def test_crossing_arm_threshold_stays_below_the_decision_threshold():

@@ -14,8 +14,10 @@ Filter ``message_kind = spoofed`` in messages.csv to see every poisoned message.
 from __future__ import annotations
 
 import csv
+import json
 import os
-from typing import Iterator
+from datetime import datetime, timezone
+from typing import Iterator, Sequence
 
 from .v2x.cpm import CollectivePerceptionMessage, diff_cpms
 
@@ -384,3 +386,62 @@ class TrajectoryWriter:
             self._fh.close()
         except Exception:
             pass
+
+
+def write_comparison(out_dir: str, summary: dict, runs: Sequence[str]) -> dict:
+    """Write ``comparison.json`` without discarding runs this invocation skipped.
+
+    A single-run invocation used to overwrite the combined file outright. That is
+    how ``out/vru_warning/comparison.json`` came to hold nothing but the spoofed
+    run and an empty verdict: a later ``--run spoofed`` erased the honest run's
+    numbers from the one file the scenario advertises as its record. The data
+    survived only in the run's own ``run_summary.json``, where nobody looks.
+
+    So runs from earlier invocations are carried over rather than dropped, each
+    tagged with where it came from. The verdict and the evidence finding are NOT
+    recomputed across them: two runs from two invocations may have been driven by
+    different world state, and a verdict silently spanning them would be exactly
+    the kind of unearned claim the evidence guard exists to refuse. They stay as
+    this invocation computed them, and ``runs_this_invocation`` says which runs
+    that was.
+    """
+    path = os.path.join(out_dir, "comparison.json")
+    merged = dict(summary)
+    merged["runs"] = dict(summary.get("runs") or {})
+    merged["runs_this_invocation"] = list(runs)
+    merged["written_at"] = _now_iso()
+
+    previous = _read_json(path)
+    carried = []
+    for name, run in (previous.get("runs") or {}).items():
+        if name in merged["runs"]:
+            continue
+        run = dict(run)
+        run["carried_over_from"] = previous.get("written_at") or "an earlier run"
+        merged["runs"][name] = run
+        carried.append(name)
+    if carried:
+        merged["carried_over_runs"] = sorted(carried)
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(merged, fh, indent=2)
+    if carried:
+        print(f"[report] kept {', '.join(sorted(carried))} from an earlier "
+              f"invocation in comparison.json; re-run with --run both for a "
+              f"verdict across both runs")
+    return merged
+
+
+def _read_json(path: str) -> dict:
+    """The previous comparison, or an empty one. A damaged file is not fatal."""
+    try:
+        with open(path) as fh:
+            loaded = json.load(fh)
+        return loaded if isinstance(loaded, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

@@ -92,7 +92,7 @@ left-turn-mock:  ## Same scenario with no simulator at all (kinematic mock)
 
 vru-warning:     ## VRU Crossing Warning spoofing vs the live sim: make vru-warning [RUN=both]
                  ## Prepares its own world (loads Town01, clears traffic) — just 'make up' first.
-	$(COMPOSE) run --rm spoofing \
+	$(COMPOSE) run --rm --no-deps spoofing \
 	  python -m carla_spoofing.scenarios.intersection_vru_spoofing \
 	  --mode carla --host carla-sim --port 2000 --run $(RUN) \
 	  --out /workspace/out/vru_warning
