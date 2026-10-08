@@ -74,6 +74,7 @@ from ..report import (LeftTurnDecisionWriter, ReportWriter, TrajectoryWriter,
 from ..perception import build_cpm_from_objects
 from ..v2x.cpm import CollectivePerceptionMessage, PerceivedObject
 from ..v2x.packet import FileSink, NullSink, Packet, UdpSink
+from .do_not_pass_spoofing import _spawn_rsu_landmark
 
 Vec3 = Tuple[float, float, float]
 
@@ -1501,6 +1502,17 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
     occluders = _corner_buildings(carla, world, scene["junction_center"])
     outcome.notes.append(f"{len(occluders)} building occluder(s) near the junction")
 
+    # The RSU overlooks the junction, so the junction is its reference position.
+    # NOT the surveyed RSU_LOCATION the config defaults to: that belongs to the
+    # reference scene's crossroads, and this run finds its junction from the road
+    # graph, which on the last live run left the two 24 m apart -- a pole standing
+    # in the middle of an unrelated block. Only the range filter reads this (the
+    # RSU's report is deliberately unoccluded: seeing what the ego cannot is the
+    # whole premise of the scenario), and the scene sits well inside rsu_range_m
+    # from either point, so the honest messages are unchanged.
+    cfg.rsu_position = (scene["junction_center"][0],
+                        scene["junction_center"][1], RSU_LOCATION[2])
+
     # Put the drone in the scene before synchronous mode: AirSim's controller
     # needs the sim stepping freely to settle into its hover.
     # Derived even when the drone is not flown: the pose is also the reference
@@ -1545,6 +1557,15 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args,
                              "points?). Try --clean-vehicles.")
         spawned = [ego, crossing]
         print(f"[lta] ego={ego.id} crossing={crossing.id}")
+
+        # After `spawned` is bound, so the props are destroyed with the vehicles.
+        # Gives the impersonated infrastructure something visible in the
+        # recording: the RSU is otherwise a virtual station (see RSU_STATION_ID)
+        # and the drone appears to steal an identity belonging to nothing.
+        rsu_actors, rsu_note = _spawn_rsu_landmark(carla, world, cfg)
+        spawned.extend(rsu_actors)
+        outcome.notes.append(rsu_note)
+        print(f"[lta] {rsu_note}")
 
         drone = _find_drone(world)
         if drone is not None:

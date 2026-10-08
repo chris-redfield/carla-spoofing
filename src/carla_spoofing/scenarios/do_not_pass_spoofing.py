@@ -874,7 +874,10 @@ def run_carla(cfg: ScenarioConfig, sink, msg_writer, dec_writer, args) -> Outcom
                     a.destroy()
             raise SystemExit("Could not spawn all three vehicles (blocked spawn "
                              "points?). Try --clean-vehicles.")
-        spawned = [ego, lead, onc]
+        # `+=`, not `=`: the RSU landmark props were already added to this list
+        # a few lines up, and rebinding it would drop them from the teardown --
+        # they would then persist in the world and stack up run after run.
+        spawned += [ego, lead, onc]
         print(f"[dnp] ego={ego.id} lead={lead.id} oncoming={onc.id}")
 
         drone = _find_drone(world)
